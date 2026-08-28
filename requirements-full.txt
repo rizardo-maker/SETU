@@ -1,0 +1,22 @@
+# Optional / heavy. Install when you're ready to add real models.
+# Run: pip install -r requirements-full.txt
+# Each is also lazy-imported in code, so the server runs without these —
+# it just falls back to stub / degraded behaviour and says so out loud.
+
+# Currency + detection training and inference
+torch==2.4.1
+torchvision==0.19.1
+timm==1.0.9
+onnx==1.16.2
+onnxruntime==1.19.2          # add onnxruntime-silicon or the CoreML EP build for speed on Apple chips
+
+# OCR (Tier 1 text reading)
+paddleocr==2.8.1
+paddlepaddle==2.6.2
+
+# Object / obstacle detection — AGPL-3.0, see README licensing note
+ultralytics==8.2.103
+
+# Speech
+faster-whisper==1.0.3
+piper-tts==1.2.0

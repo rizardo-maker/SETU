@@ -1,0 +1,84 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Local SSL Certificates and Keys (generated via scripts/gen_certs.sh)
+certs/
+*.pem
+*.key
+*.crt
+*.csr
+*.pfx
+*.p12
+
+# Model weights, datasets, checkpoints, and audio caches
+*.onnx
+*.pt
+*.pth
+*.bin
+*.safetensors
+models/weights/
+models/tts/
+models/*.onnx
+models/*.pt
+models/*.pth
+models/*.bin
+models/*.safetensors
+data/
+dataset/
+datasets/
+runs/
+checkpoints/
+!models/README.md
+
+# Environment variables and secrets
+.env
+.env.*
+*.env
+!.env.example
+
+# Logs and runtime databases
+*.log
+logs/
+*.sqlite
+*.sqlite3
+*.db
+
+# Operating System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+
+# IDE & Editor artifacts
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Node / Web dependencies (if any)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Testing & Type checking caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/

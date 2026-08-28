@@ -1,0 +1,174 @@
+/* Big targets, high contrast, no reliance on colour alone — this is
+   built for a low-vision sighted tester as much as a blind primary
+   user. Nothing here is decorative; every rule earns its place. */
+
+:root {
+  --bg: #0b0f14;
+  --fg: #f2f5f7;
+  --accent: #ffb020;
+  --muted: #93a1ad;
+  --danger: #ff6b6b;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  min-height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #1c2530;
+}
+
+.topbar h1 {
+  font-size: 1.25rem;
+  margin: 0;
+  letter-spacing: 0.08em;
+}
+
+.badge {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem;
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+video {
+  width: 100%;
+  border-radius: 12px;
+  background: #000;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+}
+
+#capture-area {
+  min-height: 30vh;
+  border: 3px dashed var(--accent);
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  user-select: none;
+}
+
+#capture-area:focus-visible {
+  outline: 4px solid var(--accent);
+  outline-offset: 4px;
+}
+
+.capture-hint {
+  font-size: 1.5rem;
+  text-align: center;
+  color: var(--accent);
+  margin: 0;
+}
+
+.modes {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.5rem;
+}
+
+.modes button {
+  padding: 1rem;
+  font-size: 1rem;
+  border-radius: 10px;
+  border: 2px solid #263241;
+  background: #121a24;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.modes button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: #241d0f;
+}
+
+.modes button:focus-visible {
+  outline: 3px solid var(--accent);
+}
+
+.action-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.action-btn {
+  padding: 0.85rem 1.25rem;
+  font-size: 1rem;
+  font-weight: 600;
+  border-radius: 10px;
+  border: none;
+  cursor: pointer;
+  transition: transform 0.1s ease, filter 0.15s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.action-btn:active {
+  transform: scale(0.98);
+}
+
+.action-btn-accent {
+  background: var(--accent);
+  color: #121a24;
+}
+
+.action-btn-primary {
+  background: #2563eb;
+  color: #ffffff;
+}
+
+.question-container {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.question-container input {
+  flex: 1;
+  padding: 0.75rem;
+  border-radius: 8px;
+  border: 2px solid #263241;
+  background: #0f151d;
+  color: var(--fg);
+  font-size: 1rem;
+}
+
+.question-container input:focus {
+  outline: none;
+  border-color: #2563eb;
+}
+
+#status {
+  color: var(--muted);
+  font-size: 0.85rem;
+  min-height: 1.2em;
+}
+
+#transcript {
+  font-size: 1.1rem;
+  min-height: 1.4em;
+  background: rgba(255, 255, 255, 0.05);
+  padding: 0.75rem;
+  border-radius: 8px;
+  border-left: 3px solid var(--accent);
+}

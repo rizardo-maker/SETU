@@ -1,0 +1,9 @@
+{
+  "name": "SETU",
+  "short_name": "SETU",
+  "description": "Offline visual assistance for blind and low-vision users",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b0f14",
+  "theme_color": "#0b0f14"
+}

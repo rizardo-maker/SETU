@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>SETU</title>
+  <link rel="manifest" href="/static/manifest.json" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <!-- This UI is built audio-first: the big region below is the only
+       control most users need. Everything else is here for sighted
+       teammates/judges watching the screen, and for keyboard access. -->
+
+  <header class="topbar">
+    <h1>SETU</h1>
+    <span id="tier2-badge" class="badge" aria-live="polite">Scene description: checking…</span>
+  </header>
+
+  <main>
+    <video id="camera" playsinline autoplay muted></video>
+
+    <div
+      id="capture-area"
+      role="button"
+      tabindex="0"
+      aria-label="Tap or press Enter to start or stop listening in the current mode"
+    >
+      <p class="capture-hint">Tap anywhere<br />to start</p>
+    </div>
+
+    <nav class="modes" aria-label="Assistance mode">
+      <button data-mode="currency" aria-pressed="true">💵 Currency</button>
+      <button data-mode="text" aria-pressed="false">📖 Read Text</button>
+      <button data-mode="obstacle" aria-pressed="false">⚠️ Obstacles</button>
+      <button data-mode="scene" aria-pressed="false">👁️ Describe Scene</button>
+      <button data-mode="question" aria-pressed="false">❓ Ask a Question</button>
+    </nav>
+
+    <!-- Dedicated action buttons for direct submission -->
+    <div class="action-section">
+      <button id="describe-scene-btn" class="action-btn action-btn-accent" type="button">
+        📸 Describe Scene Now
+      </button>
+
+      <div class="question-container">
+        <input
+          id="question-input"
+          type="text"
+          placeholder="Ask a question about what camera sees..."
+          aria-label="Question for Ask a Question mode"
+        />
+        <button id="submit-question-btn" class="action-btn action-btn-primary" type="button">
+          Ask
+        </button>
+      </div>
+    </div>
+
+    <p id="status" aria-live="off"></p>
+    <p id="transcript" role="status" aria-live="assertive"></p>
+  </main>
+
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>
