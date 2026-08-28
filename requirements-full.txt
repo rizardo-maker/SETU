@@ -13,6 +13,7 @@ onnxruntime==1.19.2          # add onnxruntime-silicon or the CoreML EP build fo
 # OCR (Tier 1 text reading)
 paddleocr==2.8.1
 paddlepaddle==2.6.2
+pytesseract==0.3.13   # lighter fallback — also needs the `tesseract` binary on PATH (brew install tesseract)
 
 # Object / obstacle detection — AGPL-3.0, see README licensing note
 ultralytics==8.2.103

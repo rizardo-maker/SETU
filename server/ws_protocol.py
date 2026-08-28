@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 class ClientFrame(BaseModel):
     """One camera frame plus what the user is asking of it."""
     type: Literal["frame"] = "frame"
-    mode: Literal["currency", "text", "obstacle", "scene", "question"]
+    mode: Literal["currency", "text", "obstacle", "collision", "scene", "question"]
     image_b64: str                      # JPEG, base64, no data-URI prefix
     question: Optional[str] = None      # optional user question (used in "question" and "text" modes)
     seq: int = 0                        # client-assigned, echoed back for backpressure
@@ -73,7 +73,12 @@ class ServerResult(BaseModel):
     mode: str
     answered: bool                 # False when the system abstained
     label: Optional[str] = None    # e.g. "500" for currency, or free text for scene
-    ocr_text: Optional[str] = None # raw OCR text when available
+    denominations: Optional[list[int]] = None  # currency mode: [500, 100, 100] etc.
+    total_value: Optional[int] = None          # currency mode: sum of denominations
+    detection_count: Optional[int] = None      # currency / collision: number of detected objects
+    ocr_text: Optional[str] = None             # raw OCR text when available
+    ocr_confidence: Optional[float] = None     # 0..1 mean OCR confidence, when available
+    collision_alert: Optional[str] = None      # collision mode: severity level "warn" or "urgent"
     confidence: Optional[float] = None
     margin: Optional[float] = None
     speak: str                     # what should be spoken/shown regardless of answered

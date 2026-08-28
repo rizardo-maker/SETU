@@ -20,14 +20,22 @@ USE_TLS = os.environ.get("SETU_TLS", "1") == "1"   # getUserMedia requires HTTPS
 CERT_FILE = ROOT_DIR / "certs" / "cert.pem"
 KEY_FILE = ROOT_DIR / "certs" / "key.pem"
 
-# ---- Tier 1: currency classifier ----
-CURRENCY_MODEL_PATH = MODELS_DIR / "currency_classifier.onnx"
+# ---- Tier 1: currency detector (YOLO) ----
+CURRENCY_YOLO_MODEL_PATH = MODELS_DIR / "currency_best.pt"   # ships pretrained; see training/currency_yolo/
+CURRENCY_MODEL_PATH = MODELS_DIR / "currency_classifier.onnx"  # legacy ONNX fallback path (unused unless you build one)
 CURRENCY_LABELS_PATH = MODELS_DIR / "currency_labels.json"
-CURRENCY_INPUT_SIZE = 224          # square, matches MobileNetV3/EfficientNet-B0 default
-CURRENCY_TEMPERATURE = 1.7         # placeholder — refit on your held-out set, see training/
-CURRENCY_CONF_FLOOR = 0.80
+CURRENCY_INPUT_SIZE = 224          # legacy — square input for the ONNX fallback
+CURRENCY_TEMPERATURE = 1.7         # legacy — placeholder for ONNX arbiter
+CURRENCY_CONF_FLOOR = 0.60         # YOLO detection confidence floor; the trained model is very confident on real notes
 CURRENCY_MARGIN_FLOOR = 0.25
-CURRENCY_FRAMES_REQUIRED = 3       # multi-frame agreement window
+CURRENCY_FRAMES_REQUIRED = 2       # frames that must agree on the same denomination set before we speak
+
+# ---- Tier 1: obstacle / collision detection (YOLO) ----
+YOLO_GENERAL_MODEL_PATH = MODELS_DIR / "yolo11n.pt"            # general COCO detector; also used by collision mode
+COLLISION_CONF_FLOOR = 0.45                                    # YOLO detection confidence to consider real
+COLLISION_CLOSE_AREA_FRACTION = 0.22                           # box area / frame area to call an object "close"
+COLLISION_URGENT_AREA_FRACTION = 0.40                          # box area / frame area to alert with urgency
+COLLISION_HINT_COOLDOWN_S = 2.0                                # min seconds between spoken collision alerts
 
 # ---- Tier 1: quality gate (feeds both the abstain decision and the audio sonar) ----
 GATE_SHARPNESS_FLOOR = 60.0        # variance-of-Laplacian; tune against your own camera/lighting
@@ -48,6 +56,19 @@ VLM_TEMPERATURE = 0.1
 VLM_NUM_PREDICT = 80
 VLM_TIMEOUT_S = 20.0
 
+# ---- Tier 1: OCR text-reasoning (OCR extracts, Gemma reasons over the result) ----
+OCR_MIN_CONFIDENCE = float(os.environ.get("SETU_OCR_MIN_CONFIDENCE", "0.35"))  # 0..1; below this we don't trust the text enough to reason over it
+OCR_TEXT_MAX_CHARS = 2000   # truncate before handing to the VLM — a cluttered scene can OCR to far more than any question needs
+OCR_REASONING_SYSTEM_PROMPT = (
+    "You answer questions using text extracted from a photo via OCR, for a blind "
+    "user. The text is noisy: it may have misread characters, jumbled word order, "
+    "or merged lines. Silently correct obvious OCR mistakes when you're confident "
+    "what the real word was. Never invent facts that aren't in the given text — "
+    "if the text doesn't contain the answer, say so plainly instead of guessing. "
+    "Plain spoken language, no markdown, no lists, 1-2 sentences. "
+    "If the text is too garbled or unrelated to answer from, reply with exactly: UNCLEAR"
+)
+
 # ---- Speech ----
 STT_MODEL_SIZE = os.environ.get("SETU_STT_MODEL", "base")   # faster-whisper size
 STT_LANGUAGE = None   # None = auto-detect; set e.g. "te", "hi", "en" to force one
@@ -67,5 +88,7 @@ PHRASES = {
     "abstain_motion": "Keep moving slowly until I say stop.",
     "vlm_unclear": "I can't tell from this image. Try moving a little closer.",
     "tier2_unavailable": "The description feature isn't available right now, but currency and text reading still work.",
+    "ocr_low_confidence": "The text is too unclear to read reliably. Try moving closer or improving the lighting.",
+    "collision_clear": "Path is clear.",
     "ready": "Got it.",
 }

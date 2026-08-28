@@ -9,11 +9,19 @@ either installed.
 """
 from __future__ import annotations
 import logging
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 
 log = logging.getLogger("setu.ocr")
+
+
+@dataclass
+class OCRResult:
+    text: str
+    mean_confidence: float   # 0..1, 0.0 when no text / backend gives no signal
+    backend: str
 
 
 class OCREngine:
@@ -51,19 +59,44 @@ class OCREngine:
         return self.backend is not None
 
     def read(self, bgr_frame: np.ndarray) -> str:
+        """Back-compat convenience: text only, no confidence. Prefer read_with_confidence()."""
+        return self.read_with_confidence(bgr_frame).text
+
+    def read_with_confidence(self, bgr_frame: np.ndarray) -> OCRResult:
         if self.backend == "paddleocr":
             result = self._paddle.ocr(bgr_frame, cls=True)
-            lines = []
+            lines: list[str] = []
+            confs: list[float] = []
             for page in result or []:
-                for _box, (text, _conf) in page:
+                for _box, (text, conf) in page:
                     lines.append(text)
-            return " ".join(lines).strip()
+                    confs.append(float(conf))
+            text = " ".join(lines).strip()
+            mean_conf = (sum(confs) / len(confs)) if confs else 0.0
+            return OCRResult(text=text, mean_confidence=mean_conf, backend=self.backend)
 
         if self.backend == "tesseract":
             import pytesseract
             import cv2
             gray = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY)
-            return pytesseract.image_to_string(gray).strip()
+            data = pytesseract.image_to_data(gray, output_type=pytesseract.Output.DICT)
+            words: list[str] = []
+            confs: list[float] = []
+            for word, conf_str in zip(data["text"], data["conf"]):
+                word = word.strip()
+                if not word:
+                    continue
+                try:
+                    conf = float(conf_str)
+                except (TypeError, ValueError):
+                    continue
+                if conf < 0:   # tesseract emits -1 for non-text regions
+                    continue
+                words.append(word)
+                confs.append(conf / 100.0)   # tesseract reports 0..100
+            text = " ".join(words).strip()
+            mean_conf = (sum(confs) / len(confs)) if confs else 0.0
+            return OCRResult(text=text, mean_confidence=mean_conf, backend=self.backend)
 
         raise RuntimeError(
             "No OCR backend installed. pip install -r requirements-full.txt "

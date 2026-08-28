@@ -10,6 +10,7 @@ is more important than almost anything else in this codebase — see
 the project document's "fault tolerance" section for why.
 """
 from __future__ import annotations
+import asyncio
 import base64
 import logging
 import ssl
@@ -27,7 +28,6 @@ from server.ws_protocol import parse_client_message, ClientFrame, ClientAudio, C
 from server.tier1 import quality_gate, currency, ocr, detect
 from server.tier2 import vlm
 from server.speech import stt, tts
-from server.arbiter import MultiFrameArbiter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("setu.vlm").setLevel(logging.DEBUG)
@@ -44,6 +44,25 @@ async def lifespan(app: FastAPI):
     log.info("STT ready: %s", stt.engine.ready)
     log.info("TTS ready: %s (%s)", tts.engine.ready, tts.engine.backend)
     await vlm.warm_up()
+
+    # Warm up YOLO models — the first inference call inside a live async
+    # request otherwise hangs the event loop for ~10-40s while Metal/CUDA
+    # sets up its kernels. Running a throwaway prediction now moves that
+    # cost to startup where it belongs.
+    warmup_frame = np.zeros((640, 640, 3), dtype=np.uint8)
+    if currency.classifier.ready:
+        try:
+            currency.classifier.detect(warmup_frame)
+            log.info("[Startup] Currency YOLO warm.")
+        except Exception as e:
+            log.warning("[Startup] Currency YOLO warmup failed: %s", e)
+    if detect.detector.ready:
+        try:
+            detect.detector.scan_for_collision(warmup_frame)
+            log.info("[Startup] Obstacle/collision YOLO warm.")
+        except Exception as e:
+            log.warning("[Startup] Obstacle YOLO warmup failed: %s", e)
+
     yield
     log.info("SETU shutting down.")
 
@@ -67,19 +86,83 @@ class ConnectionState:
 
     def __init__(self):
         self.prev_gray: np.ndarray | None = None
-        self.arbiter = MultiFrameArbiter(labels=currency.classifier.labels or [])
+        self.currency_arbiter = currency.YOLOFrameArbiter()
         self.last_mode: str | None = None
         self.last_hint_time: float = 0.0
+        self.last_collision_hint_time: float = 0.0
         self.last_result: dict | None = None
 
     def reset_for_mode(self, mode: str) -> None:
         if mode != self.last_mode:
-            self.arbiter.reset()
+            self.currency_arbiter.reset()
             self.prev_gray = None
             self.last_mode = mode
 
 
 HINT_COOLDOWN_S = 1.5
+
+
+async def run_text_mode(frame: np.ndarray, question: str | None) -> dict:
+    """
+    Shared OCR -> (optional) Gemma-reasoning pipeline for "text" mode, used by
+    both the WebSocket frame handler and the single-shot /api/ocr endpoint.
+
+    Decision tree:
+      no OCR backend      -> fall back to VLM reading the image directly (tier 2)
+      no text found       -> honest "no text found", no VLM call
+      low OCR confidence  -> honest "too unclear", no VLM call (garbage in -> hallucinated answer out)
+      question asked      -> OCR text handed to Gemma for reasoning (tier 1, extra latency)
+      no question         -> raw OCR text spoken directly (tier 1, fast, no VLM round trip)
+
+    Returns a dict of the fields callers merge into their own response shape
+    (WS result / REST JSON) — always includes at least "answered", "speak",
+    "tier"; includes "ocr_text" / "ocr_confidence" / "label" when applicable.
+    """
+    q = question.strip() if question and question.strip() else None
+
+    if not ocr.engine.ready:
+        if await vlm.is_available():
+            ok, jpeg_bytes = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            speak, latency_ms = await vlm.describe(
+                jpeg_bytes.tobytes(),
+                question=q or "Read and transcribe all visible text or signboards in this image. Keep it concise. If there is no text, say 'No text found'."
+            )
+            return {"tier": 2, "answered": "no text" not in speak.lower(), "speak": speak, "latency_ms": round(latency_ms, 1)}
+        return {"tier": 1, "answered": False, "speak": "No OCR backend installed."}
+
+    result = ocr.engine.read_with_confidence(frame)
+    log.info("📖 [OCR] backend=%s confidence=%.2f (%d chars): %r",
+              result.backend, result.mean_confidence, len(result.text), result.text[:120])
+
+    if not result.text:
+        return {"tier": 1, "answered": False, "speak": "No text found. Try moving closer."}
+
+    if result.mean_confidence < config.OCR_MIN_CONFIDENCE:
+        log.info("📖 [OCR] confidence %.2f below floor %.2f — declining to reason over it",
+                  result.mean_confidence, config.OCR_MIN_CONFIDENCE)
+        return {
+            "tier": 1, "answered": False, "speak": config.PHRASES["ocr_low_confidence"],
+            "ocr_text": result.text, "ocr_confidence": round(result.mean_confidence, 3),
+        }
+
+    if q:
+        try:
+            speak, vlm_latency = await vlm.answer_from_text(result.text, q, result.mean_confidence)
+            log.info("🤖 [Gemma Answer from OCR] (%.0fms): '%s'", vlm_latency, speak)
+        except vlm.VLMUnavailable:
+            log.warning("VLM unavailable for OCR reasoning — speaking raw OCR text instead")
+            speak = result.text
+        return {
+            "tier": 1, "answered": True, "label": result.text, "speak": speak,
+            "ocr_text": result.text, "ocr_confidence": round(result.mean_confidence, 3),
+        }
+
+    # No question: reading text back verbatim is a legitimate fast path —
+    # don't spend 2-6s on a VLM round trip nobody asked for.
+    return {
+        "tier": 1, "answered": True, "label": result.text, "speak": result.text,
+        "ocr_text": result.text, "ocr_confidence": round(result.mean_confidence, 3),
+    }
 
 
 async def handle_frame(msg: ClientFrame, state: ConnectionState, ws: WebSocket) -> None:
@@ -128,21 +211,37 @@ async def handle_frame(msg: ClientFrame, state: ConnectionState, ws: WebSocket) 
                                 "answered": False, "speak": config.PHRASES["tier2_unavailable"]})
         return
 
-    # For continuous streaming currency/obstacle mode, skip unsharp/dark frames if quality gate rejects
+    # For continuous streaming currency/obstacle mode, skip unsharp/dark frames if quality gate rejects.
+    # Collision is deliberately NOT in this list — you can't refuse to check for a collision because the
+    # user's phone shook slightly. The safety trade-off is inverted from the currency/obstacle case.
     if msg.mode in ("currency", "obstacle") and not gate.accept and (currency.classifier.ready or detect.detector.ready):
-        return  # guidance already sent; don't waste inference on a bad frame
+        # Also send an abstain-shaped result so the client's in-flight tracker
+        # can advance to the next frame instead of blocking forever on this seq.
+        await ws.send_json({
+            "type": "result", "seq": msg.seq, "tier": 1, "mode": msg.mode,
+            "answered": False, "speak": "",
+            "latency_ms": round((time.monotonic() - t0) * 1000, 1),
+        })
+        return
 
     # ---- Tier 1 modes (with seamless VLM fallback if specialized model not installed) ----
     if msg.mode == "currency":
         if currency.classifier.ready:
-            logits = currency.classifier.predict_logits(frame)
-            decision = state.arbiter.submit(logits)
+            # YOLO inference is synchronous & CPU/GPU-bound — run it off the
+            # event loop so we don't stall other WebSocket clients or the
+            # sonar guidance stream while it runs.
+            detections = await asyncio.to_thread(currency.classifier.detect, frame)
+            decision = state.currency_arbiter.submit(detections)
+            log.info("💵 [Currency] detections=%d denominations=%s answered=%s",
+                     len(detections), decision.denominations, decision.answered)
             await ws.send_json({
                 "type": "result", "seq": msg.seq, "tier": 1, "mode": "currency",
                 "answered": decision.answered,
-                "label": currency.classifier.labels[decision.label_idx] if decision.answered else None,
+                "label": ",".join(str(d) for d in decision.denominations) if decision.denominations else None,
+                "denominations": decision.denominations,
+                "total_value": decision.total_value,
                 "confidence": round(decision.confidence, 3),
-                "margin": round(decision.margin, 3),
+                "detection_count": decision.detection_count,
                 "speak": decision.speak,
                 "latency_ms": round((time.monotonic() - t0) * 1000, 1),
             })
@@ -160,57 +259,27 @@ async def handle_frame(msg: ClientFrame, state: ConnectionState, ws: WebSocket) 
         else:
             await ws.send_json({"type": "result", "seq": msg.seq, "tier": 1, "mode": "currency",
                                 "answered": False,
-                                "speak": "The currency model hasn't been trained yet."})
+                                "speak": "The currency model isn't loaded. Drop weights into models/."})
             return
 
     if msg.mode == "text":
         log.info("📖 [Text Mode] Processing frame (OCR ready: %s, question: %r)",
                  ocr.engine.ready, msg.question)
-        if ocr.engine.ready:
-            try:
-                text = ocr.engine.read(frame)
-                log.info("📖 [OCR Extracted Text] (%d chars): %r", len(text), text[:120] if text else "")
-                if not text:
-                    await ws.send_json({"type": "result", "seq": msg.seq, "tier": 1, "mode": "text",
-                                        "answered": False, "speak": "No text found. Try moving closer.",
-                                        "latency_ms": round((time.monotonic() - t0) * 1000, 1)})
-                    return
-
-                prompt_q = msg.question.strip() if (msg.question and msg.question.strip()) else "Read and clearly transcribe or summarize the key text in 1-2 sentences."
-                try:
-                    speak, _vlm_latency = await vlm.answer_from_text(text, prompt_q)
-                    log.info("🤖 [Gemma Answer from OCR] (%0.1fms): '%s'", _vlm_latency, speak)
-                except vlm.VLMUnavailable:
-                    log.warning("VLM unavailable, speaking raw OCR text")
-                    speak = text
-
-                await ws.send_json({"type": "result", "seq": msg.seq, "tier": 1, "mode": "text",
-                                    "answered": True, "label": text, "ocr_text": text, "speak": speak,
-                                    "latency_ms": round((time.monotonic() - t0) * 1000, 1)})
-            except RuntimeError as e:
-                log.error("OCR runtime error: %s", e)
-                await ws.send_json({"type": "result", "seq": msg.seq, "tier": 1, "mode": "text",
-                                    "answered": False, "speak": str(e)})
-            return
-        elif await vlm.is_available():
-            ok, jpeg_bytes = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            speak, latency_ms = await vlm.describe(
-                jpeg_bytes.tobytes(),
-                question=msg.question if (msg.question and msg.question.strip()) else "Read and transcribe all visible text or signboards in this image. Keep it concise. If there is no text, say 'No text found'."
-            )
-            await ws.send_json({"type": "result", "seq": msg.seq, "tier": 2, "mode": "text",
-                                "answered": "no text" not in speak.lower(), "speak": speak,
-                                "latency_ms": round(latency_ms, 1)})
-            return
-        else:
+        try:
+            result = await run_text_mode(frame, msg.question)
+        except RuntimeError as e:
+            log.error("OCR runtime error: %s", e)
             await ws.send_json({"type": "result", "seq": msg.seq, "tier": 1, "mode": "text",
-                                "answered": False, "speak": "No OCR backend installed."})
+                                "answered": False, "speak": str(e)})
             return
+        result.setdefault("latency_ms", round((time.monotonic() - t0) * 1000, 1))
+        await ws.send_json({"type": "result", "seq": msg.seq, "mode": "text", **result})
+        return
 
     if msg.mode == "obstacle":
         if detect.detector.ready:
             try:
-                dets = detect.detector.detect(frame)
+                dets = await asyncio.to_thread(detect.detector.detect, frame)
                 await ws.send_json({"type": "result", "seq": msg.seq, "tier": 1, "mode": "obstacle",
                                     "answered": True, "speak": detect.detector.speak(dets),
                                     "latency_ms": round((time.monotonic() - t0) * 1000, 1)})
@@ -233,6 +302,39 @@ async def handle_frame(msg: ClientFrame, state: ConnectionState, ws: WebSocket) 
                                 "answered": False, "speak": "Obstacle detector not available."})
             return
 
+    if msg.mode == "collision":
+        if not detect.detector.ready:
+            await ws.send_json({"type": "result", "seq": msg.seq, "tier": 1, "mode": "collision",
+                                "answered": False,
+                                "speak": "Collision detector not available. Install ultralytics."})
+            return
+        try:
+            threats = await asyncio.to_thread(detect.detector.scan_for_collision, frame)
+        except RuntimeError as e:
+            await ws.send_json({"type": "result", "seq": msg.seq, "tier": 1, "mode": "collision",
+                                "answered": False, "speak": str(e)})
+            return
+        speak, severity = detect.detector.speak_collision(threats)
+        # Cooldown-limit the audio: continuous streaming would otherwise
+        # spam "chair close ahead" every 200ms while the chair sits there.
+        # The visual/haptic status still updates every frame.
+        speak_this_frame = None
+        if severity is not None and (now - state.last_collision_hint_time) >= config.COLLISION_HINT_COOLDOWN_S:
+            speak_this_frame = speak
+            state.last_collision_hint_time = now
+        log.info("🚧 [Collision] threats=%d severity=%s speak=%r",
+                 len(threats), severity, speak_this_frame)
+        await ws.send_json({
+            "type": "result", "seq": msg.seq, "tier": 1, "mode": "collision",
+            "answered": bool(threats),
+            "collision_alert": severity,
+            "detection_count": len(threats),
+            "label": ", ".join(sorted({t.label for t in threats})) if threats else None,
+            "speak": speak_this_frame or "",   # empty string = don't say anything this tick
+            "latency_ms": round((time.monotonic() - t0) * 1000, 1),
+        })
+        return
+
 
 async def handle_audio(msg: ClientAudio, ws: WebSocket) -> None:
     try:
@@ -250,7 +352,7 @@ async def handle_control(msg: ClientControl, state: ConnectionState, ws: WebSock
     elif msg.action == "repeat" and state.last_result:
         await ws.send_json(state.last_result)
     elif msg.action == "cancel":
-        state.arbiter.reset()
+        state.currency_arbiter.reset()
 
 
 @app.websocket("/ws/stream")
@@ -299,6 +401,94 @@ async def api_tts(payload: dict):
         return Response(status_code=503, content=str(e).encode())
 
 
+@app.post("/api/stt")
+async def api_stt(payload: dict):
+    """Speech-to-text endpoint for voice question mode.
+    Accepts: {"audio_b64": "..."} — WAV audio, base64 encoded, 16kHz mono PCM16 preferred.
+    Returns: {"text": "..."}
+    """
+    from fastapi.responses import JSONResponse
+    audio_b64 = payload.get("audio_b64", "")
+    if not audio_b64:
+        return JSONResponse(status_code=400, content={"error": "missing audio_b64"})
+    try:
+        wav_bytes = base64.b64decode(audio_b64)
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": f"bad base64: {e}"})
+    log.info("[API/STT] Received %d bytes of audio", len(wav_bytes))
+    try:
+        text = await asyncio.to_thread(stt.engine.transcribe, wav_bytes)
+    except stt.STTUnavailable as e:
+        log.warning("[API/STT] STT unavailable: %s", e)
+        return JSONResponse(status_code=503, content={"error": str(e), "text": ""})
+    log.info("[API/STT] Transcribed: %r", text)
+    return JSONResponse(content={"text": text})
+
+
+@app.post("/api/currency")
+async def api_currency(payload: dict):
+    """Single-shot currency detection via the YOLO classifier.
+    Accepts: {"image_b64": "..."}
+    Returns: {"speak": "...", "denominations": [...], "total_value": N, "detection_count": N, "answered": bool}
+    Falls back to VLM if the YOLO model isn't loaded.
+    """
+    from fastapi.responses import JSONResponse
+    image_b64 = payload.get("image_b64", "")
+    if not image_b64:
+        return JSONResponse(status_code=400, content={"error": "missing image_b64"})
+    try:
+        frame = decode_jpeg_b64(image_b64)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+    # Gemma is the gatekeeper for "is there actually currency here?" The
+    # YOLO currency model has no negative class — it confidently labels a
+    # face or a bus as "100 rupees" — so we cannot trust it to decide
+    # whether currency is present. Gemma reliably answers yes/no. If yes,
+    # we hand off to YOLO for the exact denomination breakdown, which is
+    # what YOLO is actually good at.
+    ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    gemma_says_currency = True
+    try:
+        verdict, _ = await vlm.describe(
+            jpeg.tobytes(),
+            question="Is there an Indian paper currency note or coin clearly visible in this image? Answer with only the single word YES or NO.",
+        )
+        gemma_says_currency = "yes" in verdict.strip().lower()[:6]
+        log.info("[API/CURRENCY] Gemma currency-present verdict: %r -> %s", verdict[:40], gemma_says_currency)
+    except vlm.VLMUnavailable:
+        gemma_says_currency = True   # no Gemma — fall through and trust YOLO
+
+    if not gemma_says_currency:
+        return JSONResponse(content={
+            "answered": False, "denominations": [], "total_value": 0,
+            "detection_count": 0, "speak": "No currency detected. Point the camera at the notes.",
+        })
+
+    if currency.classifier.ready:
+        detections = await asyncio.to_thread(currency.classifier.detect, frame)
+        if detections:
+            denoms = sorted((d["denomination"] for d in detections), reverse=True)
+            total = sum(denoms)
+            speak = currency._speak_for(list(denoms), total)
+            log.info("[API/CURRENCY] denominations=%s total=%d", denoms, total)
+            return JSONResponse(content={
+                "answered": True, "denominations": denoms, "total_value": total,
+                "detection_count": len(detections), "speak": speak,
+            })
+
+    # Gemma confirmed currency but YOLO couldn't localise it (or isn't
+    # loaded) — let Gemma read the denominations directly as a fallback.
+    try:
+        speak, _ = await vlm.describe(
+            jpeg.tobytes(),
+            question="List every Indian rupee note denomination visible and give the total in one short sentence.",
+        )
+    except vlm.VLMUnavailable:
+        speak = "I can see currency but couldn't read the denomination."
+    return JSONResponse(content={"answered": True, "speak": speak, "denominations": [], "total_value": 0})
+
+
 @app.post("/api/vlm")
 async def api_vlm(payload: dict):
     """Single-shot VLM endpoint for scene description and questions.
@@ -341,7 +531,8 @@ async def api_vlm(payload: dict):
 async def api_ocr(payload: dict):
     """Single-shot OCR + Gemma reasoning endpoint.
     Accepts: {"image_b64": "...", "question": "optional question"}
-    Returns: {"speak": "...", "ocr_text": "...", "latency_ms": ..., "tier": 1}
+    Returns: {"speak": "...", "ocr_text": "...", "ocr_confidence": ..., "answered": ..., "tier": ..., "latency_ms": ...}
+    Shares its decision logic with the WebSocket "text" mode via run_text_mode().
     """
     from fastapi.responses import JSONResponse
     image_b64 = payload.get("image_b64", "")
@@ -358,52 +549,15 @@ async def api_ocr(payload: dict):
         log.error("[API/OCR] Image decode failed: %s", e)
         return JSONResponse(status_code=400, content={"error": str(e)})
 
-    if ocr.engine.ready:
-        try:
-            text = ocr.engine.read(frame)
-            log.info("[API/OCR] Extracted text (%d chars): %r", len(text), text[:120] if text else "")
-            if not text:
-                return JSONResponse(content={
-                    "speak": "No text found. Try moving closer.",
-                    "ocr_text": "",
-                    "answered": False,
-                    "tier": 1,
-                    "latency_ms": round((time.monotonic() - t0) * 1000, 1),
-                })
+    try:
+        result = await run_text_mode(frame, question)
+    except RuntimeError as e:
+        log.error("[API/OCR] OCR error: %s", e)
+        return JSONResponse(status_code=500, content={"error": str(e), "speak": "OCR processing failed."})
 
-            prompt_q = question.strip() if (question and question.strip()) else "Read and clearly transcribe or summarize the key text in 1-2 sentences."
-            try:
-                speak, _ = await vlm.answer_from_text(text, prompt_q)
-                log.info("[API/OCR] Gemma answer: '%s'", speak[:100])
-            except vlm.VLMUnavailable:
-                log.warning("[API/OCR] VLM unavailable, falling back to raw OCR text")
-                speak = text
-
-            return JSONResponse(content={
-                "speak": speak,
-                "ocr_text": text,
-                "answered": True,
-                "tier": 1,
-                "latency_ms": round((time.monotonic() - t0) * 1000, 1),
-            })
-        except Exception as e:
-            log.error("[API/OCR] OCR error: %s", e)
-            return JSONResponse(status_code=500, content={"error": str(e), "speak": "OCR processing failed."})
-    elif await vlm.is_available():
-        ok, jpeg_bytes = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        speak, latency_ms = await vlm.describe(
-            jpeg_bytes.tobytes(),
-            question=question if (question and question.strip()) else "Read and transcribe all visible text in this image."
-        )
-        return JSONResponse(content={
-            "speak": speak,
-            "ocr_text": speak,
-            "answered": "no text" not in speak.lower(),
-            "tier": 2,
-            "latency_ms": round(latency_ms, 1),
-        })
-    else:
-        return JSONResponse(status_code=503, content={"error": "No OCR or VLM available", "speak": "No OCR backend installed."})
+    result.setdefault("latency_ms", round((time.monotonic() - t0) * 1000, 1))
+    log.info("[API/OCR] Response (%.0fms, tier=%s): '%s'", result["latency_ms"], result["tier"], result["speak"][:100])
+    return JSONResponse(content=result)
 
 
 @app.get("/")

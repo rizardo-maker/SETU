@@ -1,13 +1,18 @@
-/* Big targets, high contrast, no reliance on colour alone — this is
-   built for a low-vision sighted tester as much as a blind primary
-   user. Nothing here is decorative; every rule earns its place. */
+/* Voice-first minimal UI. The screen is not the primary interface —
+   the audio + haptic channel is — but a low-vision sighted tester
+   should be able to see what's happening at a glance. High contrast,
+   big text, one card at the centre. */
 
 :root {
   --bg: #0b0f14;
   --fg: #f2f5f7;
   --accent: #ffb020;
   --muted: #93a1ad;
-  --danger: #ff6b6b;
+  --success: #10b981;
+  --warn: #f59e0b;
+  --danger: #ef4444;
+  --card-bg: #121a24;
+  --card-border: #263241;
 }
 
 * { box-sizing: border-box; }
@@ -37,12 +42,21 @@ body {
 .badge {
   font-size: 0.8rem;
   color: var(--muted);
+  padding: 0.25rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.badge.listening {
+  color: #0b0f14;
+  background: var(--accent);
+  font-weight: 600;
 }
 
 main {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: 1rem;
   padding: 1rem;
   max-width: 640px;
   margin: 0 auto;
@@ -56,140 +70,58 @@ video {
   object-fit: cover;
 }
 
-#capture-area {
-  min-height: 30vh;
-  border: 3px dashed var(--accent);
+/* The single central card that swaps state between "collision watch"
+   and the active mode. Big, high contrast, colour-coded by state. */
+.mode-card {
+  padding: 1.5rem 1.25rem;
   border-radius: 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  user-select: none;
-}
-
-#capture-area:focus-visible {
-  outline: 4px solid var(--accent);
-  outline-offset: 4px;
-}
-
-.capture-hint {
-  font-size: 1.5rem;
+  background: var(--card-bg);
+  border: 3px solid var(--card-border);
   text-align: center;
-  color: var(--accent);
-  margin: 0;
+  transition: border-color 0.2s ease, background 0.2s ease;
 }
 
-.modes {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 0.5rem;
+.mode-card[data-state="clear"]   { border-color: var(--success); }
+.mode-card[data-state="warn"]    { border-color: var(--warn); background: #2a1a05; }
+.mode-card[data-state="urgent"]  { border-color: var(--danger); background: #3a0f0f; animation: pulse 0.6s ease-in-out infinite alternate; }
+.mode-card[data-state="mode"]    { border-color: var(--accent); background: #241d0f; }
+.mode-card[data-state="listen"]  { border-color: #2563eb; background: #0f1a2e; }
+
+@keyframes pulse {
+  from { transform: scale(1); }
+  to   { transform: scale(1.03); }
 }
 
-.modes button {
-  padding: 1rem;
-  font-size: 1rem;
-  border-radius: 10px;
-  border: 2px solid #263241;
-  background: #121a24;
-  color: var(--fg);
-  cursor: pointer;
-}
+.mode-icon  { font-size: 3rem; line-height: 1; }
+.mode-label { font-size: 1.5rem; font-weight: 700; margin-top: 0.5rem; }
+.mode-detail { font-size: 1rem; color: var(--muted); margin-top: 0.4rem; min-height: 1.4em; }
 
-.modes button[aria-pressed="true"] {
-  border-color: var(--accent);
-  background: #241d0f;
-}
-
-.modes button:focus-visible {
-  outline: 3px solid var(--accent);
-}
-
-.action-section {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-
-.action-buttons-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 0.5rem;
-}
-
-@media (max-width: 420px) {
-  .action-buttons-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-.action-btn {
-  padding: 0.85rem 1.25rem;
-  font-size: 1rem;
-  font-weight: 600;
-  border-radius: 10px;
-  border: none;
-  cursor: pointer;
-  transition: transform 0.1s ease, filter 0.15s ease;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-}
-
-.action-btn:active {
-  transform: scale(0.98);
-}
-
-.action-btn-accent {
-  background: var(--accent);
-  color: #121a24;
-}
-
-.action-btn-success {
-  background: #059669;
-  color: #ffffff;
-}
-
-.action-btn-success:active {
-  background: #047857;
-}
-
-.action-btn-primary {
-  background: #2563eb;
-  color: #ffffff;
-}
-
-.question-container {
-  display: flex;
-  gap: 0.5rem;
-}
-
-.question-container input {
-  flex: 1;
-  padding: 0.75rem;
-  border-radius: 8px;
-  border: 2px solid #263241;
-  background: #0f151d;
-  color: var(--fg);
-  font-size: 1rem;
-}
-
-.question-container input:focus {
-  outline: none;
-  border-color: #2563eb;
-}
-
-#status {
+.wake-hint {
+  text-align: center;
   color: var(--muted);
-  font-size: 0.85rem;
-  min-height: 1.2em;
+  font-size: 0.9rem;
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 8px;
 }
+
+.wake-hint b { color: var(--accent); font-weight: 600; }
 
 #transcript {
-  font-size: 1.1rem;
+  font-size: 1rem;
   min-height: 1.4em;
-  background: rgba(255, 255, 255, 0.05);
-  padding: 0.75rem;
-  border-radius: 8px;
+  color: var(--muted);
+  font-style: italic;
+  padding: 0.5rem 0.75rem;
   border-left: 3px solid var(--accent);
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 4px;
+}
+
+.footer-status {
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-align: center;
+  margin: 0;
 }

@@ -1,22 +1,28 @@
 """
-Currency denomination classifier — Tier 1 "reflex" path.
+Currency denomination detector — Tier 1 "reflex" path.
 
-Deliberately NOT a vision-language model. See the architecture notes
-in the project document: a calibrated small classifier is the only
-thing we're willing to let tell a blind user how much money they're
-holding, because it's the only thing here whose confidence we can
-measure and threshold. The Ollama VLM in tier2/vlm.py handles
-everything open-ended instead.
+Uses a YOLO detector trained on the Indian currency dataset (see
+`training/currency_yolo/` and `datasets/currency/`). Ships with
+`models/currency_best.pt` already trained on 10 classes:
+  10_new, 10_old, 20, 50_new, 50_old, 100_new, 100_old, 200, 500, 2000
 
-This module is honest about not having a trained model yet:
-`CurrencyClassifier.ready` is False until you drop a real
-currency_classifier.onnx + currency_labels.json into models/ (see
-training/train_currency_classifier.py). main.py checks `.ready` and
-tells the user the truth rather than guessing with an untrained graph.
+Why YOLO rather than a single-image classifier: a user may hold more
+than one note, and the per-detection confidence YOLO gives us is
+what we actually need to decide "abstain or speak". The old
+placeholder ONNX single-image classifier is retained as a fallback
+below only for teams who prefer that path — it self-reports
+`.ready = False` until they train and drop in weights.
+
+Design principle carried over from the ONNX version: `ready` is
+False when nothing works, and we tell the user honestly rather than
+fabricating an answer with an untrained graph.
 """
 from __future__ import annotations
 import json
 import logging
+import re
+from collections import deque
+from dataclasses import dataclass, field
 from typing import Optional
 
 import cv2
@@ -26,76 +32,189 @@ from server import config
 
 log = logging.getLogger("setu.currency")
 
-# ImageNet normalisation — matches the MobileNetV3/EfficientNet-B0
-# pretrained weights the training script starts from. Change both
-# here and in training/ together if you switch base architectures.
-_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+# ---- Denomination parsing --------------------------------------------------
+
+def extract_denomination(label: str) -> int:
+    """`10_new` -> 10, `100_old` -> 100, `2000` -> 2000, unknown -> 0."""
+    match = re.search(r"\d+", label)
+    return int(match.group(0)) if match else 0
 
 
-def preprocess(bgr_frame: np.ndarray, size: int = config.CURRENCY_INPUT_SIZE) -> np.ndarray:
-    """BGR uint8 HWC -> normalised float32 NCHW, batch size 1."""
-    rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
-    resized = cv2.resize(rgb, (size, size), interpolation=cv2.INTER_AREA)
-    arr = resized.astype(np.float32) / 255.0
-    arr = (arr - _MEAN) / _STD
-    chw = np.transpose(arr, (2, 0, 1))
-    return np.expand_dims(chw, axis=0).astype(np.float32)
+# ---- Multi-frame arbitration -----------------------------------------------
+# YOLO gives us per-detection confidence directly, so we don't need temperature
+# scaling like the ONNX classifier did. We just want to require N consecutive
+# frames to agree on the same *multiset* of denominations before speaking, to
+# avoid speaking a jittery mid-motion frame.
+
+@dataclass
+class YOLODecision:
+    answered: bool
+    speak: str
+    denominations: list[int] = field(default_factory=list)   # e.g. [500, 100]
+    total_value: int = 0
+    confidence: float = 0.0   # min over all detections in the winning frame
+    detection_count: int = 0
 
 
-class ModelNotReady(RuntimeError):
-    """Raised when predict() is called but no trained model is loaded.
-    Callers must catch this and tell the user honestly — never fall
-    back to a fabricated answer."""
+class YOLOFrameArbiter:
+    """Requires `frames_required` consecutive frames to agree on the same
+    (sorted) tuple of denominations before speaking. Any change resets."""
+
+    def __init__(self, frames_required: int = config.CURRENCY_FRAMES_REQUIRED):
+        self.frames_required = frames_required
+        self._buffer: deque[tuple[int, ...]] = deque(maxlen=frames_required)
+        self._last_frame: Optional[dict] = None
+
+    def reset(self) -> None:
+        self._buffer.clear()
+        self._last_frame = None
+
+    def submit(self, detections: list[dict]) -> YOLODecision:
+        """
+        Feed one frame's YOLO detections (each: {label, denomination, confidence}).
+        Returns YOLODecision — check .answered before treating output as final.
+        """
+        if not detections:
+            self._buffer.clear()
+            self._last_frame = None
+            return YOLODecision(answered=False, speak="No currency detected. Hold a note in view.")
+
+        denoms = tuple(sorted((d["denomination"] for d in detections), reverse=True))
+        self._buffer.append(denoms)
+        self._last_frame = {"denoms": denoms, "detections": detections}
+
+        # Wait until the buffer's full AND every frame in the buffer agrees.
+        if len(self._buffer) < self.frames_required:
+            return YOLODecision(
+                answered=False,
+                speak="Hold steady, still checking.",
+                denominations=list(denoms),
+                total_value=sum(denoms),
+                detection_count=len(detections),
+            )
+
+        if not all(b == denoms for b in self._buffer):
+            return YOLODecision(
+                answered=False,
+                speak="Hold steady, still checking.",
+                denominations=list(denoms),
+                total_value=sum(denoms),
+                detection_count=len(detections),
+            )
+
+        min_conf = min(float(d["confidence"]) for d in detections)
+        if min_conf < config.CURRENCY_CONF_FLOOR:
+            return YOLODecision(
+                answered=False,
+                speak=config.PHRASES["abstain_low_conf"],
+                denominations=list(denoms),
+                total_value=sum(denoms),
+                confidence=min_conf,
+                detection_count=len(detections),
+            )
+
+        total = sum(denoms)
+        speak = _speak_for(list(denoms), total)
+        return YOLODecision(
+            answered=True,
+            speak=speak,
+            denominations=list(denoms),
+            total_value=total,
+            confidence=min_conf,
+            detection_count=len(detections),
+        )
 
 
-class CurrencyClassifier:
+def _speak_for(denominations: list[int], total: int) -> str:
+    """Compact spoken phrasing for one or many notes."""
+    if not denominations:
+        return "No currency detected."
+    if len(denominations) == 1:
+        return f"{denominations[0]} rupees."
+    # Group identical denominations for readability: [500,500,100] -> "two 500s and a 100"
+    counts: dict[int, int] = {}
+    for d in denominations:
+        counts[d] = counts.get(d, 0) + 1
+    parts: list[str] = []
+    for denom in sorted(counts.keys(), reverse=True):
+        n = counts[denom]
+        parts.append(f"{n} times {denom}" if n > 1 else f"{denom}")
+    joined = ", ".join(parts)
+    return f"{joined}. Total {total} rupees."
+
+
+# ---- Detector --------------------------------------------------------------
+
+class CurrencyDetector:
+    """YOLO-based multi-note detector. Falls back to `.ready = False` if
+    ultralytics is not installed or the trained weights aren't in models/."""
+
     def __init__(self):
         self.ready = False
-        self.labels: list[str] = []
-        self._session = None
-        self._input_name: Optional[str] = None
+        self._model = None
+        self.labels: list[str] = []      # kept for main.py compatibility
         self._load()
 
     def _load(self) -> None:
-        if not config.CURRENCY_MODEL_PATH.exists():
+        if not config.CURRENCY_YOLO_MODEL_PATH.exists():
             log.warning(
-                "No currency model at %s — Tier 1 currency mode will report "
-                "itself unavailable until you train one.",
-                config.CURRENCY_MODEL_PATH,
+                "No currency YOLO model at %s — Tier 1 currency mode will report "
+                "itself unavailable until you drop in trained weights.",
+                config.CURRENCY_YOLO_MODEL_PATH,
             )
-            return
-        if not config.CURRENCY_LABELS_PATH.exists():
-            log.warning("Currency model found but labels file missing at %s", config.CURRENCY_LABELS_PATH)
             return
         try:
-            import onnxruntime as ort  # lazy: keeps the server bootable without onnxruntime installed
+            from ultralytics import YOLO  # lazy
         except ImportError:
-            log.warning("onnxruntime not installed — pip install -r requirements-full.txt to enable currency mode")
+            log.warning("ultralytics not installed — pip install -r requirements-full.txt to enable currency mode")
             return
-
-        providers = ["CPUExecutionProvider"]
-        # CoreMLExecutionProvider is available on some onnxruntime builds for
-        # Apple Silicon and is worth adding once you've confirmed it's present:
-        # if "CoreMLExecutionProvider" in ort.get_available_providers():
-        #     providers.insert(0, "CoreMLExecutionProvider")
-        self._session = ort.InferenceSession(str(config.CURRENCY_MODEL_PATH), providers=providers)
-        self._input_name = self._session.get_inputs()[0].name
-        self.labels = json.loads(config.CURRENCY_LABELS_PATH.read_text())
+        try:
+            self._model = YOLO(str(config.CURRENCY_YOLO_MODEL_PATH))
+        except Exception as e:
+            log.warning("Failed to load currency model %s: %s", config.CURRENCY_YOLO_MODEL_PATH, e)
+            return
+        self.labels = list(self._model.names.values())
         self.ready = True
-        log.info("Currency classifier loaded: %d classes, providers=%s", len(self.labels), providers)
+        log.info("Currency detector loaded (YOLO): %d classes", len(self.labels))
 
-    def predict_logits(self, bgr_frame: np.ndarray) -> np.ndarray:
+    def detect(
+        self,
+        bgr_frame: np.ndarray,
+        conf_threshold: float = config.CURRENCY_CONF_FLOOR,
+        iou_threshold: float = 0.45,
+    ) -> list[dict]:
+        """Returns list of {label, denomination, confidence, bbox}."""
         if not self.ready:
-            raise ModelNotReady(
-                "Currency model isn't trained yet. Run training/train_currency_classifier.py "
-                "and place the exported .onnx + labels.json in models/."
+            raise RuntimeError(
+                "Currency model isn't loaded. Drop weights at "
+                f"{config.CURRENCY_YOLO_MODEL_PATH} (see training/currency_yolo/README.md)."
             )
-        x = preprocess(bgr_frame)
-        outputs = self._session.run(None, {self._input_name: x})
-        return outputs[0][0]  # (num_classes,) logits for the single image in the batch
+        results = self._model.predict(
+            source=bgr_frame,
+            conf=conf_threshold,
+            iou=iou_threshold,
+            verbose=False,
+        )
+        detections: list[dict] = []
+        if not results:
+            return detections
+        res = results[0]
+        if res.boxes is None or len(res.boxes) == 0:
+            return detections
+        xyxy = res.boxes.xyxy.cpu().numpy()
+        confs = res.boxes.conf.cpu().numpy()
+        cls_ids = res.boxes.cls.cpu().numpy().astype(int)
+        for box, score, cid in zip(xyxy, confs, cls_ids):
+            label = res.names.get(cid, str(cid))
+            detections.append({
+                "label": label,
+                "denomination": extract_denomination(label),
+                "confidence": round(float(score), 4),
+                "bbox": [round(float(c), 1) for c in box],
+            })
+        return detections
 
 
-# Module-level singleton — one model, shared across connections. Loading
-# is the expensive part; inference is cheap and stateless per call.
-classifier = CurrencyClassifier()
+# Module-level singleton — one model, shared across connections.
+classifier = CurrencyDetector()
