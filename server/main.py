@@ -128,8 +128,8 @@ async def handle_frame(msg: ClientFrame, state: ConnectionState, ws: WebSocket) 
                                 "answered": False, "speak": config.PHRASES["tier2_unavailable"]})
         return
 
-    # For continuous streaming Tier 1 modes, skip unsharp/dark frames if quality gate rejects
-    if not gate.accept and (currency.classifier.ready or ocr.engine.ready or detect.detector.ready):
+    # For continuous streaming currency/obstacle mode, skip unsharp/dark frames if quality gate rejects
+    if msg.mode in ("currency", "obstacle") and not gate.accept and (currency.classifier.ready or detect.detector.ready):
         return  # guidance already sent; don't waste inference on a bad frame
 
     # ---- Tier 1 modes (with seamless VLM fallback if specialized model not installed) ----
@@ -164,14 +164,31 @@ async def handle_frame(msg: ClientFrame, state: ConnectionState, ws: WebSocket) 
             return
 
     if msg.mode == "text":
+        log.info("📖 [Text Mode] Processing frame (OCR ready: %s, question: %r)",
+                 ocr.engine.ready, msg.question)
         if ocr.engine.ready:
             try:
                 text = ocr.engine.read(frame)
-                speak = text if text else "No text found. Try moving closer."
+                log.info("📖 [OCR Extracted Text] (%d chars): %r", len(text), text[:120] if text else "")
+                if not text:
+                    await ws.send_json({"type": "result", "seq": msg.seq, "tier": 1, "mode": "text",
+                                        "answered": False, "speak": "No text found. Try moving closer.",
+                                        "latency_ms": round((time.monotonic() - t0) * 1000, 1)})
+                    return
+
+                prompt_q = msg.question.strip() if (msg.question and msg.question.strip()) else "Read and clearly transcribe or summarize the key text in 1-2 sentences."
+                try:
+                    speak, _vlm_latency = await vlm.answer_from_text(text, prompt_q)
+                    log.info("🤖 [Gemma Answer from OCR] (%0.1fms): '%s'", _vlm_latency, speak)
+                except vlm.VLMUnavailable:
+                    log.warning("VLM unavailable, speaking raw OCR text")
+                    speak = text
+
                 await ws.send_json({"type": "result", "seq": msg.seq, "tier": 1, "mode": "text",
-                                    "answered": bool(text), "label": text, "speak": speak,
+                                    "answered": True, "label": text, "ocr_text": text, "speak": speak,
                                     "latency_ms": round((time.monotonic() - t0) * 1000, 1)})
             except RuntimeError as e:
+                log.error("OCR runtime error: %s", e)
                 await ws.send_json({"type": "result", "seq": msg.seq, "tier": 1, "mode": "text",
                                     "answered": False, "speak": str(e)})
             return
@@ -179,7 +196,7 @@ async def handle_frame(msg: ClientFrame, state: ConnectionState, ws: WebSocket) 
             ok, jpeg_bytes = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
             speak, latency_ms = await vlm.describe(
                 jpeg_bytes.tobytes(),
-                question="Read and transcribe all visible text or signboards in this image. Keep it concise. If there is no text, say 'No text found'."
+                question=msg.question if (msg.question and msg.question.strip()) else "Read and transcribe all visible text or signboards in this image. Keep it concise. If there is no text, say 'No text found'."
             )
             await ws.send_json({"type": "result", "seq": msg.seq, "tier": 2, "mode": "text",
                                 "answered": "no text" not in speak.lower(), "speak": speak,
@@ -318,6 +335,75 @@ async def api_vlm(payload: dict):
     except vlm.VLMUnavailable as e:
         log.warning("[API/VLM] VLM unavailable: %s", e)
         return JSONResponse(status_code=503, content={"error": str(e), "speak": config.PHRASES["tier2_unavailable"]})
+
+
+@app.post("/api/ocr")
+async def api_ocr(payload: dict):
+    """Single-shot OCR + Gemma reasoning endpoint.
+    Accepts: {"image_b64": "...", "question": "optional question"}
+    Returns: {"speak": "...", "ocr_text": "...", "latency_ms": ..., "tier": 1}
+    """
+    from fastapi.responses import JSONResponse
+    image_b64 = payload.get("image_b64", "")
+    question = payload.get("question")
+    if not image_b64:
+        return JSONResponse(status_code=400, content={"error": "missing image_b64"})
+
+    t0 = time.monotonic()
+    log.info("[API/OCR] Request received — image_b64 len=%d, question=%r", len(image_b64), question)
+
+    try:
+        frame = decode_jpeg_b64(image_b64)
+    except ValueError as e:
+        log.error("[API/OCR] Image decode failed: %s", e)
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+    if ocr.engine.ready:
+        try:
+            text = ocr.engine.read(frame)
+            log.info("[API/OCR] Extracted text (%d chars): %r", len(text), text[:120] if text else "")
+            if not text:
+                return JSONResponse(content={
+                    "speak": "No text found. Try moving closer.",
+                    "ocr_text": "",
+                    "answered": False,
+                    "tier": 1,
+                    "latency_ms": round((time.monotonic() - t0) * 1000, 1),
+                })
+
+            prompt_q = question.strip() if (question and question.strip()) else "Read and clearly transcribe or summarize the key text in 1-2 sentences."
+            try:
+                speak, _ = await vlm.answer_from_text(text, prompt_q)
+                log.info("[API/OCR] Gemma answer: '%s'", speak[:100])
+            except vlm.VLMUnavailable:
+                log.warning("[API/OCR] VLM unavailable, falling back to raw OCR text")
+                speak = text
+
+            return JSONResponse(content={
+                "speak": speak,
+                "ocr_text": text,
+                "answered": True,
+                "tier": 1,
+                "latency_ms": round((time.monotonic() - t0) * 1000, 1),
+            })
+        except Exception as e:
+            log.error("[API/OCR] OCR error: %s", e)
+            return JSONResponse(status_code=500, content={"error": str(e), "speak": "OCR processing failed."})
+    elif await vlm.is_available():
+        ok, jpeg_bytes = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        speak, latency_ms = await vlm.describe(
+            jpeg_bytes.tobytes(),
+            question=question if (question and question.strip()) else "Read and transcribe all visible text in this image."
+        )
+        return JSONResponse(content={
+            "speak": speak,
+            "ocr_text": speak,
+            "answered": "no text" not in speak.lower(),
+            "tier": 2,
+            "latency_ms": round(latency_ms, 1),
+        })
+    else:
+        return JSONResponse(status_code=503, content={"error": "No OCR or VLM available", "speak": "No OCR backend installed."})
 
 
 @app.get("/")

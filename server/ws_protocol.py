@@ -19,7 +19,7 @@ class ClientFrame(BaseModel):
     type: Literal["frame"] = "frame"
     mode: Literal["currency", "text", "obstacle", "scene", "question"]
     image_b64: str                      # JPEG, base64, no data-URI prefix
-    question: Optional[str] = None      # only used when mode == "question"
+    question: Optional[str] = None      # optional user question (used in "question" and "text" modes)
     seq: int = 0                        # client-assigned, echoed back for backpressure
 
 
@@ -73,6 +73,7 @@ class ServerResult(BaseModel):
     mode: str
     answered: bool                 # False when the system abstained
     label: Optional[str] = None    # e.g. "500" for currency, or free text for scene
+    ocr_text: Optional[str] = None # raw OCR text when available
     confidence: Optional[float] = None
     margin: Optional[float] = None
     speak: str                     # what should be spoken/shown regardless of answered

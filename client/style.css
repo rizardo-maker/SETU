@@ -110,6 +110,18 @@ video {
   gap: 0.5rem;
 }
 
+.action-buttons-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.5rem;
+}
+
+@media (max-width: 420px) {
+  .action-buttons-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .action-btn {
   padding: 0.85rem 1.25rem;
   font-size: 1rem;
@@ -131,6 +143,15 @@ video {
 .action-btn-accent {
   background: var(--accent);
   color: #121a24;
+}
+
+.action-btn-success {
+  background: #059669;
+  color: #ffffff;
+}
+
+.action-btn-success:active {
+  background: #047857;
 }
 
 .action-btn-primary {

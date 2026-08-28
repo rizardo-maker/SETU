@@ -138,6 +138,65 @@ async def describe(jpeg_bytes: bytes, question: str | None = None, system_overri
     return text, latency_ms
 
 
+async def answer_from_text(extracted_text: str, question: str | None = None, system_override: str | None = None) -> tuple[str, float]:
+    """
+    Given OCR-extracted text and an optional question, queries the local model
+    (pure text reasoning, no image payload) to reason over the text.
+    Returns (speak_text, latency_ms). Raises VLMUnavailable if Ollama isn't reachable.
+    """
+    model = await get_model_name()
+    q_str = question.strip() if question and question.strip() else "Summarize this text in 1-2 sentences."
+    user_prompt = (
+        f"Here is text extracted from an image via OCR (it may contain noise or errors):\n\n"
+        f"{extracted_text}\n\n"
+        f"Question: {q_str}"
+    )
+
+    log.debug("[VLM] answer_from_text() — model=%r, text_len=%d, question=%r",
+              model, len(extracted_text), question)
+
+    payload = {
+        "model": model,
+        "prompt": user_prompt,
+        "system": system_override or (
+            "You answer questions based on OCR-extracted text for a blind user. "
+            "Be direct, accurate, and concise (1-2 sentences). Plain spoken language, no markdown, no lists. "
+            "If the extracted text does not contain enough information to answer, say: UNCLEAR"
+        ),
+        "stream": False,
+        "keep_alive": -1,
+        "options": {
+            "temperature": config.VLM_TEMPERATURE,
+            "num_predict": config.VLM_NUM_PREDICT,
+        },
+    }
+
+    log.debug("[VLM] POST %s/api/generate  model=%r  prompt=%r  image=no",
+              config.OLLAMA_URL, model, user_prompt[:80])
+
+    t0 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=config.VLM_TIMEOUT_S) as client:
+            r = await client.post(f"{config.OLLAMA_URL}/api/generate", json=payload)
+            log.debug("[VLM] Ollama responded HTTP %d in %.0fms", r.status_code, (time.monotonic() - t0) * 1000)
+            if r.status_code != 200:
+                log.error("[VLM] Ollama returned HTTP %d — body: %s", r.status_code, r.text[:500])
+            r.raise_for_status()
+            text = r.json().get("response", "").strip()
+    except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+        log.error("[VLM] Connection failed to %s: %s", config.OLLAMA_URL, e)
+        raise VLMUnavailable(
+            f"Can't reach Ollama at {config.OLLAMA_URL}. Is it running? (`ollama serve`)"
+        ) from e
+    latency_ms = (time.monotonic() - t0) * 1000
+
+    log.debug("[VLM] Response (%.0fms): '%s'", latency_ms, text[:200])
+
+    if not text or text.upper().startswith("UNCLEAR"):
+        return config.PHRASES["vlm_unclear"], latency_ms
+    return text, latency_ms
+
+
 async def warm_up() -> None:
     """Call once at server startup so the first real request isn't the
     one paying the cold-load cost. Failure here is logged, not fatal —

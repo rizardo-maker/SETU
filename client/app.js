@@ -48,6 +48,7 @@ class SetuApp {
     this.questionInput = document.getElementById("question-input");
     this.submitQuestionBtn = document.getElementById("submit-question-btn");
     this.describeSceneBtn = document.getElementById("describe-scene-btn");
+    this.readTextBtn = document.getElementById("read-text-btn");
 
     this.sonar = new Sonar();
     this.ws = null;
@@ -138,6 +139,11 @@ class SetuApp {
       this.describeSceneBtn.addEventListener("click", () => this.triggerDescribeScene());
     }
 
+    // Direct "Read Text Now" button
+    if (this.readTextBtn) {
+      this.readTextBtn.addEventListener("click", () => this.triggerReadText());
+    }
+
     // Direct "Ask Question" button
     if (this.submitQuestionBtn) {
       this.submitQuestionBtn.addEventListener("click", () => this.triggerAskQuestion());
@@ -171,14 +177,92 @@ class SetuApp {
     this._sendVLMRequest(null);
   }
 
+  async triggerReadText() {
+    const q = this.questionInput ? this.questionInput.value.trim() : "";
+    console.log("📖 [SETU UI] 'Read Text' triggered! Question:", q);
+    this.setMode("text");
+    this._interruptSpeech();
+    if (this.statusEl) {
+      this.statusEl.textContent = q
+        ? `Reading text & asking Gemma3: "${q}"...`
+        : "Reading text via OCR & reasoning with Gemma3...";
+    }
+
+    const b64 = this._captureFrame();
+    if (!b64) {
+      console.error("❌ [SETU Text] No frame captured — camera may not be ready.");
+      this.announce("Camera is not ready. Please allow camera access and try again.");
+      return;
+    }
+
+    try {
+      const res = await fetch("/api/ocr", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image_b64: b64, question: q || null }),
+      });
+      const data = await res.json();
+      console.log(`📥 [SETU OCR Response] (${data.latency_ms}ms):`, data);
+
+      if (res.ok) {
+        this.announce(data.speak);
+        this._renderResult({
+          tier: data.tier || 1,
+          mode: "text",
+          speak: data.speak,
+          ocr_text: data.ocr_text,
+          latency_ms: data.latency_ms,
+        });
+      } else {
+        this.announce(data.speak || data.error || "Could not read text.");
+      }
+    } catch (err) {
+      console.error("❌ [SETU OCR] Fetch error, falling back to WebSocket frame:", err);
+      this._sendSingleTextFrame(q || null);
+    }
+  }
+
   triggerAskQuestion() {
     const q = this.questionInput ? this.questionInput.value.trim() : "";
+    if (this.mode === "text") {
+      this.triggerReadText();
+      return;
+    }
     const questionText = q || "What is in front of me?";
     console.log("❓ [SETU UI] 'Ask Question' triggered! Question:", questionText);
     this.setMode("question");
     this._interruptSpeech();
     if (this.statusEl) this.statusEl.textContent = `Asking Gemma3: "${questionText}"...`;
     this._sendVLMRequest(questionText);
+  }
+
+  _sendSingleTextFrame(question) {
+    if (!this.wsReady) {
+      console.warn("⚠️ [SETU WebSocket] Cannot send frame — WebSocket is not open.");
+      this.announce("Server is not connected. Please wait a moment.");
+      return;
+    }
+    const b64 = this._captureFrame();
+    if (!b64) {
+      console.error("❌ [SETU Text] No frame captured — camera may not be ready.");
+      this.announce("Camera is not ready. Please allow camera access and try again.");
+      return;
+    }
+
+    this.seq += 1;
+    this.inFlightSeq = this.seq;
+    const payload = {
+      type: "frame",
+      mode: "text",
+      image_b64: b64,
+      seq: this.seq,
+    };
+    if (question) {
+      payload.question = question;
+    }
+
+    console.log(`🚀 [SETU Send] One-shot Read Text frame seq=${this.seq} | Question="${question || ""}" | Image size=${b64.length} bytes`);
+    this.ws.send(JSON.stringify(payload));
   }
 
   async _sendVLMRequest(question) {
@@ -309,8 +393,13 @@ class SetuApp {
     this.seq += 1;
     this.inFlightSeq = this.seq;
     const payload = { type: "frame", mode: this.mode, image_b64: b64, seq: this.seq };
-    if (this.mode === "question" && this.questionInput) {
-      payload.question = this.questionInput.value.trim() || "What is in front of me?";
+    if ((this.mode === "question" || this.mode === "text") && this.questionInput) {
+      const q = this.questionInput.value.trim();
+      if (q) {
+        payload.question = q;
+      } else if (this.mode === "question") {
+        payload.question = "What is in front of me?";
+      }
     }
 
     console.log(`🚀 [SETU Send] Frame seq=${this.seq} | Mode=${this.mode} | Question="${payload.question || ""}" | Image size=${b64.length} bytes`);
@@ -360,7 +449,11 @@ class SetuApp {
     if (!this.statusEl) return;
     const conf = msg.confidence != null ? ` (${Math.round(msg.confidence * 100)}%)` : "";
     const latency = msg.latency_ms != null ? ` [${msg.latency_ms}ms]` : "";
-    this.statusEl.textContent = `[Tier ${msg.tier}] ${msg.mode}: ${msg.speak}${conf}${latency}`;
+    let displayText = `[Tier ${msg.tier}] ${msg.mode}: ${msg.speak}${conf}${latency}`;
+    if (msg.ocr_text && msg.ocr_text !== msg.speak) {
+      displayText += ` (OCR: "${msg.ocr_text}")`;
+    }
+    this.statusEl.textContent = displayText;
   }
 
   async _enableTorch() {

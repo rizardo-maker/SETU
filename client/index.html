@@ -39,16 +39,21 @@
 
     <!-- Dedicated action buttons for direct submission -->
     <div class="action-section">
-      <button id="describe-scene-btn" class="action-btn action-btn-accent" type="button">
-        📸 Describe Scene Now
-      </button>
+      <div class="action-buttons-grid">
+        <button id="describe-scene-btn" class="action-btn action-btn-accent" type="button">
+          📸 Describe Scene
+        </button>
+        <button id="read-text-btn" class="action-btn action-btn-success" type="button">
+          📖 Read Text Now
+        </button>
+      </div>
 
       <div class="question-container">
         <input
           id="question-input"
           type="text"
-          placeholder="Ask a question about what camera sees..."
-          aria-label="Question for Ask a Question mode"
+          placeholder="Ask a question about what camera sees or reads..."
+          aria-label="Question for Ask a Question or Read Text mode"
         />
         <button id="submit-question-btn" class="action-btn action-btn-primary" type="button">
           Ask
