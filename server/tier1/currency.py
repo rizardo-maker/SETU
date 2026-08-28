@@ -127,20 +127,19 @@ class YOLOFrameArbiter:
 
 
 def _speak_for(denominations: list[int], total: int) -> str:
-    """Compact spoken phrasing for one or many notes."""
+    """Compact spoken phrasing for one or many notes (e.g. '500 rupees note')."""
     if not denominations:
         return "No currency detected."
     if len(denominations) == 1:
-        return f"{denominations[0]} rupees."
-    # Group identical denominations for readability: [500,500,100] -> "two 500s and a 100"
+        return f"{denominations[0]} rupees note."
     counts: dict[int, int] = {}
     for d in denominations:
         counts[d] = counts.get(d, 0) + 1
     parts: list[str] = []
     for denom in sorted(counts.keys(), reverse=True):
         n = counts[denom]
-        parts.append(f"{n} times {denom}" if n > 1 else f"{denom}")
-    joined = ", ".join(parts)
+        parts.append(f"{n} {denom} rupees notes" if n > 1 else f"{denom} rupees note")
+    joined = " and ".join(parts) if len(parts) == 2 else ", ".join(parts)
     return f"{joined}. Total {total} rupees."
 
 
@@ -207,9 +206,10 @@ class CurrencyDetector:
         cls_ids = res.boxes.cls.cpu().numpy().astype(int)
         for box, score, cid in zip(xyxy, confs, cls_ids):
             label = res.names.get(cid, str(cid))
+            denom = extract_denomination(label)
             detections.append({
                 "label": label,
-                "denomination": extract_denomination(label),
+                "denomination": denom,
                 "confidence": round(float(score), 4),
                 "bbox": [round(float(c), 1) for c in box],
             })

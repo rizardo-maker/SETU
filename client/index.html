@@ -2,47 +2,163 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>SETU</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <title>SETU — Accessible Vision & Audio Companion for the Blind</title>
   <link rel="manifest" href="/static/manifest.json" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-  <!-- Voice-first UI: no mode buttons. Default state is continuous
-       collision detection; the wake phrase "hey setu <command>"
-       invokes single-shot modes (currency / describe / read / question)
-       and returns to collision. Screen shows what's happening for
-       sighted judges + emergencies. -->
+  <!-- Ambient background lighting -->
+  <div class="ambient-bg-glow" aria-hidden="true"></div>
 
-  <header class="topbar">
-    <h1>SETU</h1>
-    <span id="listen-badge" class="badge" aria-live="polite">Initializing…</span>
-  </header>
+  <div class="app-container" id="app-root">
+    <!-- Top Navigation & Accessibility Status Header -->
+    <header class="topbar" role="banner">
+      <div class="brand" aria-label="SETU App">
+        <div class="brand-icon" aria-hidden="true">👁️</div>
+        <div class="brand-text">
+          <h1>SETU</h1>
+          <span class="brand-sub">Audio-First AI Vision</span>
+        </div>
+      </div>
+      <div class="header-controls">
+        <button id="btn-help-voice" class="icon-chip-btn" type="button" aria-label="Voice help and audio instructions" title="Voice Help (H)">
+          <span aria-hidden="true">🔊</span> Help
+        </button>
+        <span id="listen-badge" class="badge" aria-live="polite" aria-label="Microphone Status">
+          <span class="pulse-dot" aria-hidden="true"></span>
+          <span class="badge-text">Initializing…</span>
+        </span>
+      </div>
+    </header>
 
-  <main>
-    <video id="camera" playsinline autoplay muted></video>
-
-    <!-- Central status pane — swaps between "collision status" and
-         "current mode running" states, always human-readable. -->
-    <div id="mode-card" class="mode-card" role="status" aria-live="polite">
-      <div id="mode-icon" class="mode-icon">🛡️</div>
-      <div id="mode-label" class="mode-label">Collision watch</div>
-      <div id="mode-detail" class="mode-detail">Path is clear.</div>
+    <!-- Accessible Gesture Touch Zone for Blind Users -->
+    <div id="gesture-touch-zone" class="gesture-touch-zone" aria-hidden="true" title="Touch & Gesture Canvas">
+      <span class="gesture-hint">Double-tap to Speak • Swipe to Change Mode • Two-finger Tap to Silence</span>
     </div>
 
-    <!-- Wake helper line — reminds the user what to say, always visible. -->
-    <p id="wake-hint" class="wake-hint">
-      Say <b>“currency”</b>, <b>“describe”</b>, <b>“read”</b>, or <b>“question”</b>.
-      Say <b>“stop”</b> (or tap the card) to mute alerts.
-    </p>
+    <main class="main-content" role="main">
+      <!-- Camera Viewfinder with HUD overlay -->
+      <section class="camera-card" aria-label="Live Camera Viewfinder">
+        <div class="video-wrapper">
+          <video id="camera" playsinline autoplay muted aria-label="Live camera video stream"></video>
+          <div class="hud-frame" aria-hidden="true">
+            <span class="corner tl"></span>
+            <span class="corner tr"></span>
+            <span class="corner bl"></span>
+            <span class="corner br"></span>
+            <div class="scanner-laser"></div>
+          </div>
+        </div>
+      </section>
 
-    <!-- Live transcription of the latest utterance heard from the browser's
-         speech recogniser. Purely diagnostic for sighted use. -->
-    <p id="transcript" role="status" aria-live="assertive"></p>
+      <!-- Central Reactive Mode HUD Card (Tap to announce status) -->
+      <section id="mode-card" class="mode-card" role="region" aria-live="assertive" aria-atomic="true" data-state="clear" tabindex="0" aria-label="Current Mode and Safety Status">
+        <div class="card-glass-glow" aria-hidden="true"></div>
+        <div class="mode-card-inner">
+          <div id="mode-icon" class="mode-icon" aria-hidden="true">🛡️</div>
+          <div class="mode-text-wrap">
+            <h2 id="mode-label" class="mode-label">Collision watch</h2>
+            <p id="mode-detail" class="mode-detail">Path is clear.</p>
+          </div>
+        </div>
+      </section>
 
-    <!-- Small footer: last collision alert time & tier2 (Gemma) status. -->
-    <p id="footer-status" class="footer-status">Waiting for camera.</p>
-  </main>
+      <!-- Accessible Gestures Quick Bar -->
+      <div class="gesture-guide-bar" role="note" aria-label="Touch Gesture Guide">
+        <div class="guide-item"><span class="guide-key">Double Tap</span> Speak</div>
+        <div class="guide-item"><span class="guide-key">Swipe ↔</span> Switch Mode</div>
+        <div class="guide-item"><span class="guide-key">2-Finger Tap</span> Silence</div>
+        <div class="guide-item"><span class="guide-key">Hold 1s</span> Stop Alert</div>
+      </div>
+
+      <!-- Wake & Voice Command Helper Hint -->
+      <div id="wake-hint" class="wake-hint" role="status">
+        <span class="mic-glyph" aria-hidden="true">🎙️</span>
+        <span class="hint-text">Say <b>“navigate”</b>, <b>“currency”</b>, <b>“objects”</b>, <b>“read”</b>, or <b>“help”</b></span>
+      </div>
+
+      <!-- Live Speech & AI Transcript Display Bar -->
+      <section class="transcript-wrapper" aria-label="Speech and AI Feedback">
+        <div class="transcript-header">
+          <span class="transcript-label">LIVE FEEDBACK / TRANSCRIPT</span>
+        </div>
+        <p id="transcript" role="status" aria-live="assertive">Ready. Touch screen or speak command.</p>
+      </section>
+
+      <!-- High-Contrast Accessible Mode Trigger Tiles -->
+      <section class="actions-section" aria-label="Quick Mode Triggers">
+        <div class="actions-grid" role="group" aria-label="Modes">
+          <button class="action-btn btn-navigate" id="btn-navigate" data-cmd="navigate" type="button" aria-label="Navigate Mode: Find Rooms and Signboards">
+            <span class="btn-icon" aria-hidden="true">🧭</span>
+            <div class="btn-text-wrap">
+              <span class="btn-title">Navigate</span>
+              <span class="btn-sub">Find Rooms & Signs</span>
+            </div>
+          </button>
+
+          <button class="action-btn btn-currency" id="btn-currency" data-cmd="currency" type="button" aria-label="Currency Mode: Count Indian Banknotes">
+            <span class="btn-icon" aria-hidden="true">💵</span>
+            <div class="btn-text-wrap">
+              <span class="btn-title">Currency</span>
+              <span class="btn-sub">Count Banknotes</span>
+            </div>
+          </button>
+
+          <button class="action-btn btn-objects" id="btn-objects" data-cmd="objects" type="button" aria-label="Explore Mode: Detect Surrounding Objects with Directions">
+            <span class="btn-icon" aria-hidden="true">📦</span>
+            <div class="btn-text-wrap">
+              <span class="btn-title">Explore</span>
+              <span class="btn-sub">Surrounding Objects</span>
+            </div>
+          </button>
+
+          <button class="action-btn btn-proximity" id="btn-proximity" data-cmd="proximity" type="button" aria-label="Proximity Mode: Continuous Obstacle Collision Watch">
+            <span class="btn-icon" aria-hidden="true">🛡️</span>
+            <div class="btn-text-wrap">
+              <span class="btn-title">Proximity</span>
+              <span class="btn-sub">Obstacle Watch</span>
+            </div>
+          </button>
+
+          <button class="action-btn btn-read" id="btn-read" data-cmd="read" type="button" aria-label="Read Text Mode: High Accuracy OCR and AI Text Refinement">
+            <span class="btn-icon" aria-hidden="true">📖</span>
+            <div class="btn-text-wrap">
+              <span class="btn-title">Read Text</span>
+              <span class="btn-sub">OCR + AI Refine</span>
+            </div>
+          </button>
+
+          <button class="action-btn btn-describe" id="btn-describe" data-cmd="describe" type="button" aria-label="Describe Mode: Full Scene Visual Understanding">
+            <span class="btn-icon" aria-hidden="true">👁️</span>
+            <div class="btn-text-wrap">
+              <span class="btn-title">Describe</span>
+              <span class="btn-sub">Scene Understanding</span>
+            </div>
+          </button>
+
+          <button class="action-btn btn-question" id="btn-question" data-cmd="question" type="button" aria-label="Question Mode: Ask Any Question with Voice AI">
+            <span class="btn-icon" aria-hidden="true">❓</span>
+            <div class="btn-text-wrap">
+              <span class="btn-title">Question</span>
+              <span class="btn-sub">Ask Voice AI</span>
+            </div>
+          </button>
+        </div>
+      </section>
+
+      <!-- System Diagnostic & Offline Edge AI Footer -->
+      <footer class="footer" role="contentinfo">
+        <div class="system-chip">
+          <span class="edge-dot" aria-hidden="true"></span>
+          <p id="footer-status" class="footer-status">Edge AI Models Ready (Zero Cloud)</p>
+        </div>
+      </footer>
+    </main>
+  </div>
 
   <script type="module" src="/static/app.js"></script>
 </body>
