@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
-  <title>SETU — Voice First Assistant</title>
+  <title>SETU — Voice First. Always.</title>
   <link rel="manifest" href="/static/manifest.json" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,112 +11,366 @@
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-  <!-- Ambient background lighting -->
+  <!-- Ambient background glow -->
   <div class="ambient-glow" aria-hidden="true"></div>
 
   <div class="app-viewport" id="app-viewport">
     
-    <!-- Top Header -->
-    <header class="app-header">
-      <div class="brand-block">
-        <div class="soundwave-logo" aria-hidden="true">
-          <span></span><span></span><span></span><span></span><span></span>
-        </div>
-        <h1 class="brand-title">SETU</h1>
-      </div>
-      <p class="brand-tagline">Voice First. Always.</p>
-      
-      <div class="status-pill" id="main-status-pill" role="status" aria-live="polite">
-        <span class="status-dot" id="status-dot"></span>
-        <span class="pill-text" id="status-text">Standby (Say “Start SETU”)</span>
-      </div>
-    </header>
-
-    <!-- Main START / STOP Master Control Button -->
-    <section class="master-control-section" aria-label="Master Power Control">
-      <button class="master-power-btn btn-start" id="btn-master-toggle" type="button" aria-label="Start SETU or say Start SETU">
-        <div class="power-icon-circle" aria-hidden="true">
-          <span class="power-glyph" id="power-glyph">▶</span>
-        </div>
-        <div class="power-text-wrap">
-          <span class="power-main-label" id="power-main-label">START SETU</span>
-          <span class="power-sub-label" id="power-sub-label">Say “Start SETU” or tap here</span>
-        </div>
-      </button>
-    </section>
-
-    <!-- Active Live Viewfinder & Safety HUD (Revealed when active) -->
-    <section class="active-hud-section" id="active-hud-section" aria-label="Live Vision and Safety Status">
-      <!-- Camera Viewfinder -->
-      <div class="camera-card">
-        <video id="camera" playsinline autoplay muted aria-label="Camera stream"></video>
-        <div class="hud-overlay" aria-hidden="true">
-          <span class="corner tl"></span>
-          <span class="corner tr"></span>
-          <span class="corner bl"></span>
-          <span class="corner br"></span>
-          <div class="scanner-laser"></div>
-        </div>
-      </div>
-
-      <!-- Reactive Mode & Safety Card -->
-      <div id="mode-card" class="reactive-mode-card" data-state="clear" role="status" aria-live="assertive">
-        <div class="mode-card-inner">
-          <div id="mode-icon" class="mode-icon">🛡️</div>
-          <div class="mode-text-wrap">
-            <h2 id="mode-label" class="mode-label">Collision Watch</h2>
-            <p id="mode-detail" class="mode-detail">Path is clear. Say any command.</p>
+    <!-- ====================================================================
+         SCREEN 1: HOME (MAIN HUB)
+         ==================================================================== -->
+    <div class="screen active" id="screen-home" role="region" aria-label="SETU Home Screen">
+      <!-- Screen 1 Header -->
+      <header class="hub-header">
+        <div class="brand-block">
+          <div class="soundwave-logo" aria-hidden="true">
+            <span></span><span></span><span></span><span></span><span></span>
           </div>
+          <h1 class="brand-title">SETU</h1>
+        </div>
+        <p class="brand-tagline">Voice First. Always.</p>
+        <div class="status-pill active" id="home-spoken-pill" role="status" aria-live="polite">
+          <span class="speaker-icon" aria-hidden="true">🔊</span>
+          <span class="pill-text" id="home-pill-text">Spoken feedback active</span>
+        </div>
+      </header>
+
+      <!-- Screen 1 Hero Tap-and-Speak Button -->
+      <button class="hero-speak-btn" id="btn-hero-speak" type="button" aria-label="Tap and speak or say Hey SETU">
+        <div class="hero-mic-circle" aria-hidden="true">
+          <svg class="mic-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+            <line x1="12" x2="12" y1="19" y2="22"></line>
+          </svg>
+        </div>
+        <div class="hero-btn-text">
+          <span class="hero-btn-main">Tap and speak</span>
+          <span class="hero-btn-sub">or say “Hey SETU”</span>
+        </div>
+      </button>
+
+      <!-- Screen 1 Main 6-Tile Navigation Grid -->
+      <nav class="hub-grid" aria-label="Primary Features">
+        <button class="hub-tile" id="btn-goto-navigate" data-nav="navigate" type="button" aria-label="Navigate: Find rooms and signs with obstacle alerts">
+          <div class="tile-icon-wrap" aria-hidden="true">
+            <svg class="tile-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="3 11 22 2 13 21 11 13 3 11"></polygon>
+            </svg>
+          </div>
+          <span class="tile-label">Navigate</span>
+        </button>
+
+        <button class="hub-tile" id="btn-goto-explore" data-nav="explore" type="button" aria-label="Explore: Detect objects and surroundings">
+          <div class="tile-icon-wrap" aria-hidden="true">
+            <svg class="tile-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="2" x2="22" y1="12" y2="12"></line>
+              <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+            </svg>
+          </div>
+          <span class="tile-label">Explore</span>
+        </button>
+
+        <button class="hub-tile" id="btn-goto-read" data-nav="read" type="button" aria-label="Read: OCR text and signboards">
+          <div class="tile-icon-wrap" aria-hidden="true">
+            <svg class="tile-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path>
+              <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path>
+            </svg>
+          </div>
+          <span class="tile-label">Read</span>
+        </button>
+
+        <button class="hub-tile" id="btn-goto-money" data-nav="money" type="button" aria-label="Money: Indian Currency Detection">
+          <div class="tile-icon-wrap" aria-hidden="true">
+            <span class="currency-symbol">₹</span>
+          </div>
+          <span class="tile-label">Money</span>
+        </button>
+
+        <button class="hub-tile" id="btn-goto-describe" data-nav="describe" type="button" aria-label="Describe: Scene Description with Local AI">
+          <div class="tile-icon-wrap" aria-hidden="true">
+            <svg class="tile-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
+              <circle cx="12" cy="13" r="4"></circle>
+            </svg>
+          </div>
+          <span class="tile-label">Describe</span>
+        </button>
+
+        <button class="hub-tile" id="btn-goto-learn" data-nav="learn" type="button" aria-label="Learn: Audio AI Study Companion">
+          <div class="tile-icon-wrap" aria-hidden="true">
+            <svg class="tile-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 10v6M2 10l10-5 10 5-10 5z"></path>
+              <path d="M6 12v5c3 3 9 3 12 0v-5"></path>
+            </svg>
+          </div>
+          <span class="tile-label">Learn</span>
+        </button>
+      </nav>
+
+      <!-- Screen 1 Bottom Guidance Banner -->
+      <footer class="bottom-speech-card" role="status" aria-live="polite">
+        <span class="speaker-icon" aria-hidden="true">🔊</span>
+        <p class="speech-text" id="home-bottom-speech">I can help. Just speak. No need to see the screen.</p>
+      </footer>
+    </div>
+
+
+    <!-- ====================================================================
+         SCREEN 2: NAVIGATION (FIND ROOM / SIGNS + OBSTACLE RADAR)
+         ==================================================================== -->
+    <div class="screen" id="screen-navigate" role="region" aria-label="Navigation Screen">
+      <!-- Screen 2 Top Header -->
+      <header class="sub-header">
+        <button class="back-btn" data-back="home" type="button" aria-label="Back to Home Screen">
+          <svg class="back-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="15 18 9 12 15 6"></polyline>
+          </svg>
+        </button>
+        <h2 class="sub-title">Navigation</h2>
+        <div class="status-pill active">
+          <span class="speaker-icon" aria-hidden="true">🔊</span>
+          <span>Spoken guidance on</span>
+        </div>
+      </header>
+
+      <!-- Screen 2 High-Contrast Warning Card -->
+      <section class="hazard-alert-card" id="nav-hazard-card" role="alert" aria-live="assertive">
+        <div class="hazard-icon-wrap" aria-hidden="true">
+          <span class="hazard-triangle">⚠️</span>
+        </div>
+        <div class="hazard-text-wrap">
+          <h3 class="hazard-title" id="nav-hazard-title">Chair ahead</h3>
+          <p class="hazard-action" id="nav-hazard-action">Move left</p>
+        </div>
+      </section>
+
+      <!-- Screen 2 Destination & Proximity Details Card -->
+      <section class="nav-target-card" role="region" aria-label="Target Details">
+        <div class="target-head">Going to</div>
+        <div class="target-name-row">
+          <h3 class="target-room" id="nav-target-room">C-214</h3>
+          <span class="target-desc" id="nav-target-desc">Computer Lab</span>
+        </div>
+        <div class="target-speech-bar">
+          <span class="speaker-icon" aria-hidden="true">🔊</span>
+          <span class="target-speech-text" id="nav-target-speech">In 10 meters, chair on your path.</span>
+        </div>
+      </section>
+
+      <!-- Screen 2 Action Controls -->
+      <div class="sub-action-row" role="group" aria-label="Navigation Controls">
+        <button class="action-card-btn btn-stop-danger" id="btn-nav-stop" type="button" aria-label="Stop navigation">
+          <span class="btn-bullet" aria-hidden="true">🔴</span>
+          <span class="btn-card-label">Stop</span>
+        </button>
+        <button class="action-card-btn btn-outline" id="btn-nav-repeat" type="button" aria-label="Repeat last guidance">
+          <span class="btn-icon-svg" aria-hidden="true">🔄</span>
+          <span class="btn-card-label">Repeat</span>
+        </button>
+        <button class="action-card-btn btn-outline" id="btn-nav-speak" type="button" aria-label="Speak destination">
+          <span class="btn-icon-svg" aria-hidden="true">🎙️</span>
+          <span class="btn-card-label">Speak</span>
+        </button>
+      </div>
+
+      <!-- Screen 2 Bottom Guidance Banner -->
+      <footer class="bottom-speech-card" role="status">
+        <span class="speaker-icon" aria-hidden="true">🔊</span>
+        <p class="speech-text" id="nav-bottom-speech">Say “Stop” or “Repeat” any time.</p>
+      </footer>
+    </div>
+
+
+    <!-- ====================================================================
+         SCREEN 3: READ TEXT (OCR + LLM REFINEMENT)
+         ==================================================================== -->
+    <div class="screen" id="screen-read" role="region" aria-label="Read Text Screen">
+      <!-- Screen 3 Top Header -->
+      <header class="sub-header">
+        <button class="back-btn" data-back="home" type="button" aria-label="Back to Home Screen">
+          <svg class="back-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="15 18 9 12 15 6"></polyline>
+          </svg>
+        </button>
+        <h2 class="sub-title">Read Text</h2>
+        <div class="status-pill active">
+          <span class="speaker-icon" aria-hidden="true">🔊</span>
+          <span>Text read aloud</span>
+        </div>
+      </header>
+
+      <!-- Screen 3 Camera Viewfinder Frame -->
+      <div class="camera-preview-card" aria-label="Signboard Viewfinder">
+        <video id="camera" playsinline autoplay muted></video>
+        <div class="camera-reticle" aria-hidden="true">
+          <div class="reticle-box"></div>
         </div>
       </div>
-    </section>
 
-    <!-- Gesture Guide Bar (Requested Exact Layout) -->
-    <section class="gesture-guide-bar" aria-label="Gesture Controls">
-      <div class="guide-item"><span class="guide-key">Double Tap</span> Speak</div>
-      <div class="guide-item"><span class="guide-key">Swipe ↔</span> Switch Mode</div>
-      <div class="guide-item"><span class="guide-key">2-Finger Tap</span> Silence</div>
-      <div class="guide-item"><span class="guide-key">Hold 1s</span> Stop Alert</div>
-    </section>
+      <!-- Screen 3 Extracted Text Card -->
+      <section class="extracted-text-card" role="region" aria-label="Recognized Text Content">
+        <div class="extracted-header">
+          <span class="speaker-icon" aria-hidden="true">🔊</span>
+          <span class="extracted-badge">Extracted text</span>
+        </div>
+        <div class="extracted-body" id="read-extracted-content" tabindex="0">
+          <p class="ext-line bold">Computer Science Department</p>
+          <p class="ext-line bold">Room C-214</p>
+          <p class="ext-line">Lab Timings: 9 AM – 5 PM</p>
+        </div>
+      </section>
 
-    <!-- Feature Shortcuts Grid (Available when SETU is running) -->
-    <nav class="feature-shortcuts-grid" aria-label="Feature Shortcuts">
-      <button class="feat-pill" data-cmd="navigate" type="button" aria-label="Navigate mode">
-        <span class="feat-icon">🧭</span> Navigate
-      </button>
-      <button class="feat-pill" data-cmd="currency" type="button" aria-label="Money currency mode">
-        <span class="feat-icon">₹</span> Money
-      </button>
-      <button class="feat-pill" data-cmd="read" type="button" aria-label="Read text mode">
-        <span class="feat-icon">📖</span> Read
-      </button>
-      <button class="feat-pill" data-cmd="objects" type="button" aria-label="Explore objects mode">
-        <span class="feat-icon">📦</span> Explore
-      </button>
-      <button class="feat-pill" data-cmd="describe" type="button" aria-label="Describe scene mode">
-        <span class="feat-icon">👁️</span> Describe
-      </button>
-      <button class="feat-pill" data-cmd="learn" type="button" aria-label="Learn audio tutor">
-        <span class="feat-icon">🎓</span> Learn
-      </button>
-    </nav>
-
-    <!-- Live Speech & AI Feedback Banner -->
-    <footer class="live-feedback-footer" role="region" aria-label="Live Voice Transcript">
-      <div class="feedback-header">
-        <span class="speaker-icon" aria-hidden="true">🔊</span>
-        <span class="feedback-title">LIVE FEEDBACK</span>
+      <!-- Screen 3 Audio Player Controls -->
+      <div class="sub-action-row" role="group" aria-label="Audio Read Controls">
+        <button class="action-card-btn btn-cyan-fill" id="btn-read-aloud" type="button" aria-label="Read aloud">
+          <span class="btn-icon-svg" aria-hidden="true">🔊</span>
+          <span class="btn-card-label">Read Aloud</span>
+        </button>
+        <button class="action-card-btn btn-outline" id="btn-read-pause" type="button" aria-label="Pause audio">
+          <span class="btn-icon-svg" aria-hidden="true">⏸️</span>
+          <span class="btn-card-label">Pause</span>
+        </button>
+        <button class="action-card-btn btn-outline" id="btn-read-repeat" type="button" aria-label="Repeat audio">
+          <span class="btn-icon-svg" aria-hidden="true">🔄</span>
+          <span class="btn-card-label">Repeat</span>
+        </button>
       </div>
-      <p id="transcript" class="transcript-text" role="status" aria-live="assertive">Say “Start SETU” to begin.</p>
-    </footer>
+
+      <!-- Screen 3 Bottom Guidance Banner -->
+      <footer class="bottom-speech-card" role="status">
+        <span class="speaker-icon" aria-hidden="true">🔊</span>
+        <p class="speech-text" id="read-bottom-speech">Reading content aloud. Swipe for more options.</p>
+      </footer>
+    </div>
+
+
+    <!-- ====================================================================
+         SCREEN 4: SETU LEARN (AI AUDIO TUTOR & QUIZ)
+         ==================================================================== -->
+    <div class="screen" id="screen-learn" role="region" aria-label="SETU Learn Screen">
+      <!-- Screen 4 Top Header -->
+      <header class="sub-header">
+        <button class="back-btn" data-back="home" type="button" aria-label="Back to Home Screen">
+          <svg class="back-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="15 18 9 12 15 6"></polyline>
+          </svg>
+        </button>
+        <h2 class="sub-title">SETU Learn</h2>
+        <div class="status-pill active">
+          <span class="speaker-icon" aria-hidden="true">🔊</span>
+          <span>Spoken feedback active</span>
+        </div>
+      </header>
+
+      <!-- Screen 4 Current Section Card -->
+      <section class="section-title-card" role="region" aria-label="Current Subject">
+        <div class="section-badge">Current Section</div>
+        <div class="section-name-row">
+          <h3 class="section-name" id="learn-section-title">Virtual Memory</h3>
+          <button class="speaker-trigger-btn" id="btn-learn-speak-title" type="button" aria-label="Speak section title">
+            <span aria-hidden="true">🔊</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- Screen 4 2x2 Learning Actions Grid -->
+      <div class="learn-actions-grid" role="group" aria-label="Learning Tools">
+        <button class="learn-tile" id="btn-learn-read" type="button" aria-label="Read Aloud current notes">
+          <span class="learn-tile-icon" aria-hidden="true">🔊</span>
+          <span class="learn-tile-label">Read Aloud</span>
+        </button>
+
+        <button class="learn-tile" id="btn-learn-explain" type="button" aria-label="Explain Simply in plain language">
+          <span class="learn-tile-icon" aria-hidden="true">💡</span>
+          <span class="learn-tile-label">Explain Simply</span>
+        </button>
+
+        <button class="learn-tile" id="btn-learn-ask" type="button" aria-label="Ask SETU a question">
+          <span class="learn-tile-icon" aria-hidden="true">💬</span>
+          <span class="learn-tile-label">Ask SETU</span>
+        </button>
+
+        <button class="learn-tile" id="btn-learn-quiz" type="button" aria-label="Quiz Me on this topic">
+          <span class="learn-tile-icon" aria-hidden="true">❓</span>
+          <span class="learn-tile-label">Quiz Me</span>
+        </button>
+      </div>
+
+      <!-- Screen 4 Dialogue Response Card -->
+      <section class="setu-dialogue-card" role="region" aria-label="AI Tutor Response">
+        <div class="dialogue-header">
+          <span class="dialogue-badge">SETU says</span>
+          <button class="speaker-trigger-btn" id="btn-learn-speak-dialogue" type="button" aria-label="Repeat response">
+            <span aria-hidden="true">🔊</span>
+          </button>
+        </div>
+        <p class="dialogue-text" id="learn-dialogue-content">
+          A page fault happens when the needed page is not in memory. I'll explain more if you ask.
+        </p>
+      </section>
+
+      <!-- Screen 4 Bottom Guidance Banner -->
+      <footer class="bottom-speech-card" role="status">
+        <span class="speaker-icon" aria-hidden="true">🔊</span>
+        <p class="speech-text" id="learn-bottom-speech">Ask a question or choose an option.</p>
+      </footer>
+    </div>
 
     <!-- Hidden compatibility elements for existing background streams -->
     <div style="display:none;" aria-hidden="true">
+      <div id="mode-card" data-state="clear">
+        <div id="mode-icon">🛡️</div>
+        <div id="mode-label">Collision watch</div>
+        <div id="mode-detail">Path is clear.</div>
+      </div>
+      <p id="transcript"></p>
       <span id="listen-badge"></span>
       <p id="footer-status"></p>
     </div>
 
   </div>
+
+  <!-- Accessible Features Legend Bar (from design) -->
+  <aside class="accessibility-legend" role="contentinfo" aria-label="Accessibility Features">
+    <div class="legend-item">
+      <span class="legend-icon">🎙️</span>
+      <div class="legend-text">
+        <strong>VOICE FIRST</strong>
+        <span>Speak. Listen. Go.</span>
+      </div>
+    </div>
+    <div class="legend-item">
+      <span class="legend-icon">👆</span>
+      <div class="legend-text">
+        <strong>LARGE TOUCH TARGETS</strong>
+        <span>Easy to tap. Easy to use.</span>
+      </div>
+    </div>
+    <div class="legend-item">
+      <span class="legend-icon">🌓</span>
+      <div class="legend-text">
+        <strong>HIGH CONTRAST</strong>
+        <span>Clear. Bold. Easy to see.</span>
+      </div>
+    </div>
+    <div class="legend-item">
+      <span class="legend-icon">♿</span>
+      <div class="legend-text">
+        <strong>SCREEN READER READY</strong>
+        <span>Works with your device.</span>
+      </div>
+    </div>
+    <div class="legend-item">
+      <span class="legend-icon">➡️</span>
+      <div class="legend-text">
+        <strong>SIMPLE NAVIGATION</strong>
+        <span>Fewer steps. Less clutter.</span>
+      </div>
+    </div>
+  </aside>
 
   <script type="module" src="/static/app.js"></script>
 </body>

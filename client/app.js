@@ -1,5 +1,7 @@
 /* ==========================================================================
-   SETU — Master Controller with START & END Voice Lifecycle
+   SETU — Master Application Controller
+   Supports all 4 Core Screens (Home, Navigate, Read, Learn) from UI Blueprint
+   With 100% Offline Edge Vision, Audio Radar, & Voice-First Control.
    ========================================================================== */
 
 const COLLISION_INTERVAL_MS = 333; // 3 FPS continuous radar stream
@@ -18,13 +20,12 @@ const COMMAND_ALIASES = {
   help:     ["help", "tutorial", "instructions", "guide", "what can i say"],
 };
 
-const START_PHRASES = ["start setu", "start", "hey setu", "wake up", "activate setu", "launch setu", "open setu"];
-const STOP_PHRASES  = ["end setu", "stop setu", "end", "stop", "close setu", "shut down", "exit", "turn off"];
-const SILENCE_PHRASES = ["quiet", "mute", "shut up", "silence", "pause"];
+const SNOOZE_PHRASES = ["stop", "ok stop", "okay stop", "quiet", "mute", "shut up", "pause"];
+const RESUME_PHRASES = ["resume", "start again", "unmute", "wake up", "listen", "continue"];
 
-class SetuMasterApp {
+class SetuApp {
   constructor() {
-    this.isRunning = false;
+    this.currentScreen = "screen-home";
     this.video = document.getElementById("camera");
     this.canvas = document.createElement("canvas");
     this.ctx2d = this.canvas.getContext("2d", { willReadFrequently: true });
@@ -32,56 +33,120 @@ class SetuMasterApp {
     this.wsReady = false;
     this.stream = null;
     this.currentAudio = null;
-    this.activeMode = "collision";
+    this.state = "idle";
     this._modeEpoch = 0;
-    this._collisionTimer = null;
-    this._collisionSeq = 0;
+    this._modeInFlight = false;
+    this._lastActionAt = 0;
     this._lastReadText = "";
+    this._collisionSeq = 0;
+    this.lastCollisionState = null;
+    this.collisionMuted = false;
     this._currentLearnTopic = "Virtual Memory";
 
     this._bindDOM();
-    this._bindGestures();
-    this._bindKeyboardShortcuts();
-    this._startVoiceListener();
   }
 
   _bindDOM() {
-    // Master Power Toggle Button
-    const toggleBtn = document.getElementById("btn-master-toggle");
-    if (toggleBtn) {
-      toggleBtn.addEventListener("click", () => {
-        if (!this.isRunning) {
-          this.startSetu();
-        } else {
-          this.endSetu();
-        }
+    // Screen Navigation Buttons
+    document.querySelectorAll("[data-nav]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const dest = btn.getAttribute("data-nav");
+        this.navigateTo(dest);
+      });
+    });
+
+    document.querySelectorAll("[data-back]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.navigateTo("home");
+      });
+    });
+
+    // Screen 1 Hero Button
+    const heroBtn = document.getElementById("btn-hero-speak");
+    if (heroBtn) {
+      heroBtn.addEventListener("click", () => {
+        this._sayAndWait("Listening. Speak your command.");
       });
     }
 
-    // Feature shortcut pills
-    document.querySelectorAll("[data-cmd]").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        const cmd = btn.getAttribute("data-cmd");
-        if (!this.isRunning) {
-          this.startSetu().then(() => this._tryInvokeCommand(cmd, "pill"));
-        } else {
-          this._tryInvokeCommand(cmd, "pill");
-        }
-      });
+    // Screen 2 Navigation Actions
+    const navStop = document.getElementById("btn-nav-stop");
+    if (navStop) navStop.addEventListener("click", () => this._stopActiveMode());
+    const navRepeat = document.getElementById("btn-nav-repeat");
+    if (navRepeat) navRepeat.addEventListener("click", () => this._repeatLastGuidance());
+    const navSpeak = document.getElementById("btn-nav-speak");
+    if (navSpeak) navSpeak.addEventListener("click", () => this._sayAndWait("Listening for destination."));
+
+    // Screen 3 Read Actions
+    const readAloud = document.getElementById("btn-read-aloud");
+    if (readAloud) readAloud.addEventListener("click", () => this._triggerSingleRead());
+    const readPause = document.getElementById("btn-read-pause");
+    if (readPause) readPause.addEventListener("click", () => this._interruptSpeech());
+    const readRepeat = document.getElementById("btn-read-repeat");
+    if (readRepeat) readRepeat.addEventListener("click", () => this._repeatLastReadText());
+
+    // Screen 4 Learn Actions
+    const learnRead = document.getElementById("btn-learn-read");
+    if (learnRead) learnRead.addEventListener("click", () => this._runLearnAction("read"));
+    const learnExplain = document.getElementById("btn-learn-explain");
+    if (learnExplain) learnExplain.addEventListener("click", () => this._runLearnAction("explain"));
+    const learnAsk = document.getElementById("btn-learn-ask");
+    if (learnAsk) learnAsk.addEventListener("click", () => this._runLearnAction("ask"));
+    const learnQuiz = document.getElementById("btn-learn-quiz");
+    if (learnQuiz) learnQuiz.addEventListener("click", () => this._runLearnAction("quiz"));
+
+    const btnLearnSpeakTitle = document.getElementById("btn-learn-speak-title");
+    if (btnLearnSpeakTitle) btnLearnSpeakTitle.addEventListener("click", () => this._sayAndWait("Current section: Virtual Memory"));
+    const btnLearnSpeakDialogue = document.getElementById("btn-learn-speak-dialogue");
+    if (btnLearnSpeakDialogue) btnLearnSpeakDialogue.addEventListener("click", () => {
+      const dialogueEl = document.getElementById("learn-dialogue-content");
+      if (dialogueEl) this._sayAndWait(dialogueEl.textContent.trim());
     });
+
+    this._bindGestures();
+    this._bindKeyboardShortcuts();
   }
 
-  // -------- START & END SETU Lifecycle --------
-  async startSetu() {
-    if (this.isRunning) return;
-    this.isRunning = true;
-    console.log("🚀 START SETU activated.");
+  // -------- Multi-Screen Routing --------
+  navigateTo(screenKey) {
+    this._interruptSpeech();
+    const targetScreenId = `screen-${screenKey}`;
+    document.querySelectorAll(".screen").forEach((sc) => sc.classList.remove("active"));
+    const targetEl = document.getElementById(targetScreenId);
+    if (targetEl) {
+      targetEl.classList.add("active");
+      this.currentScreen = targetScreenId;
+    } else {
+      document.getElementById("screen-home").classList.add("active");
+      this.currentScreen = "screen-home";
+    }
 
-    this._updatePowerUI(true);
-    if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
+    if (navigator.vibrate) navigator.vibrate(35);
 
-    // Start Camera Stream
+    // Trigger Screen-Specific Workflows
+    if (screenKey === "navigate") {
+      this._tryInvokeCommand("navigate", "screen_change");
+    } else if (screenKey === "read") {
+      this._tryInvokeCommand("read", "screen_change");
+    } else if (screenKey === "learn") {
+      this._tryInvokeCommand("learn", "screen_change");
+    } else if (screenKey === "money") {
+      this._tryInvokeCommand("currency", "screen_change");
+    } else if (screenKey === "explore") {
+      this._tryInvokeCommand("objects", "screen_change");
+    } else if (screenKey === "describe") {
+      this._tryInvokeCommand("describe", "screen_change");
+    } else if (screenKey === "home") {
+      this._returnToCollision();
+      this._sayAndWait("Home screen. Voice first. Always.");
+    }
+  }
+
+  // -------- Lifecycle & Start --------
+  async start() {
+    console.log("🚀 Starting SETU...");
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -95,152 +160,48 @@ class SetuMasterApp {
         this.video.srcObject = this.stream;
         await this.video.play();
       }
+      console.log("✅ Camera live.");
     } catch (err) {
-      console.warn("Camera access fallback:", err);
+      console.warn("Camera fallback:", err);
     }
-
     this._connectWebSocket();
-    this._startCollisionStream();
-
-    const welcomeMsg = "SETU is active. Voice first. Say any command or use gestures.";
-    this._setTranscript(welcomeMsg);
-    await this._sayAndWait(welcomeMsg);
+    this._startWakeListener();
   }
 
-  async endSetu() {
-    if (!this.isRunning) return;
-    this.isRunning = false;
-    console.log("🛑 END SETU triggered.");
-
-    this._interruptSpeech();
-    this._stopCollisionStream();
-
-    // Stop Camera Tracks
-    if (this.stream) {
-      this.stream.getTracks().forEach((track) => track.stop());
-      this.stream = null;
-    }
-    if (this.video) this.video.srcObject = null;
-
-    if (this.ws) {
-      try { this.ws.close(); } catch (_) {}
-      this.ws = null;
-    }
-
-    this._updatePowerUI(false);
-    if (navigator.vibrate) navigator.vibrate(200);
-
-    const endMsg = "SETU stopped. Standing by.";
-    this._setTranscript(endMsg);
-    await this._sayAndWait(endMsg);
-  }
-
-  _updatePowerUI(running) {
-    const btn = document.getElementById("btn-master-toggle");
-    const glyph = document.getElementById("power-glyph");
-    const mainLabel = document.getElementById("power-main-label");
-    const subLabel = document.getElementById("power-sub-label");
-    const statusPill = document.getElementById("main-status-pill");
-    const statusText = document.getElementById("status-text");
-    const activeHud = document.getElementById("active-hud-section");
-
-    if (running) {
-      if (btn) {
-        btn.className = "master-power-btn btn-stop";
-        btn.setAttribute("aria-label", "End SETU or say End SETU");
-      }
-      if (glyph) glyph.textContent = "⏹";
-      if (mainLabel) mainLabel.textContent = "END SETU";
-      if (subLabel) subLabel.textContent = "Say “End SETU” or tap here";
-      if (statusPill) statusPill.classList.add("active");
-      if (statusText) statusText.textContent = "SETU Active (Listening)";
-      if (activeHud) activeHud.classList.add("active");
-    } else {
-      if (btn) {
-        btn.className = "master-power-btn btn-start";
-        btn.setAttribute("aria-label", "Start SETU or say Start SETU");
-      }
-      if (glyph) glyph.textContent = "▶";
-      if (mainLabel) mainLabel.textContent = "START SETU";
-      if (subLabel) subLabel.textContent = "Say “Start SETU” or tap here";
-      if (statusPill) statusPill.classList.remove("active");
-      if (statusText) statusText.textContent = "Standby (Say “Start SETU”)";
-      if (activeHud) activeHud.classList.remove("active");
-    }
-  }
-
-  // -------- Gestures for Blind Access (Matching Screenshot) --------
+  // -------- Gestures for Blind Access --------
   _bindGestures() {
     let lastTap = 0;
     let touchStartX = 0;
     let touchStartY = 0;
-    let longPressTimer = null;
 
     window.addEventListener("touchstart", (e) => {
-      // 2-Finger Tap -> Silence
       if (e.touches.length === 2) {
         e.preventDefault();
         this._interruptSpeech();
         if (navigator.vibrate) navigator.vibrate(40);
-        console.log("🤫 2-Finger Tap: Silenced");
         return;
       }
       if (e.touches.length === 1) {
         touchStartX = e.touches[0].clientX;
         touchStartY = e.touches[0].clientY;
-
-        // Hold 1s -> Stop Alert / Emergency Proximity Check
-        longPressTimer = setTimeout(() => {
-          if (navigator.vibrate) navigator.vibrate([200, 80, 200]);
-          console.log("🛑 Hold 1s: Stop Alert / Proximity Check");
-          if (!this.isRunning) this.startSetu();
-          else this._runProximityMode(++this._modeEpoch);
-        }, 850);
       }
     }, { passive: false });
 
-    window.addEventListener("touchmove", (e) => {
-      if (e.touches.length === 1 && longPressTimer) {
-        const dx = Math.abs(e.touches[0].clientX - touchStartX);
-        const dy = Math.abs(e.touches[0].clientY - touchStartY);
-        if (dx > 15 || dy > 15) {
-          clearTimeout(longPressTimer);
-          longPressTimer = null;
-        }
-      }
-    }, { passive: true });
-
     window.addEventListener("touchend", (e) => {
-      if (longPressTimer) {
-        clearTimeout(longPressTimer);
-        longPressTimer = null;
-      }
-
       if (e.changedTouches.length === 1) {
         const dx = e.changedTouches[0].clientX - touchStartX;
         const dy = e.changedTouches[0].clientY - touchStartY;
-
-        // Swipe ↔ -> Switch Mode
         if (Math.abs(dx) > 75 && Math.abs(dy) < 60) {
-          if (!this.isRunning) {
-            this.startSetu();
-            return;
-          }
-          if (dx < 0) this._cycleModes(1);
-          else this._cycleModes(-1);
+          if (dx < 0) this._cycleScreens(1);  // Swipe Left -> Next Screen
+          else this._cycleScreens(-1);        // Swipe Right -> Prev Screen
           return;
         }
 
-        // Double Tap -> Speak
         const now = Date.now();
         if (now - lastTap < 320 && Math.abs(dx) < 20 && Math.abs(dy) < 20) {
           lastTap = 0;
           if (navigator.vibrate) navigator.vibrate([60, 40, 60]);
-          if (!this.isRunning) {
-            this.startSetu();
-          } else {
-            this._sayAndWait("Listening. Speak your command.");
-          }
+          this._sayAndWait("Listening. Speak your command.");
           return;
         }
         lastTap = now;
@@ -248,45 +209,40 @@ class SetuMasterApp {
     });
   }
 
-  _cycleModes(dir) {
-    const modes = ["navigate", "currency", "read", "objects", "describe", "learn", "proximity"];
-    if (this._modeIdx === undefined) this._modeIdx = 0;
-    this._modeIdx = (this._modeIdx + dir + modes.length) % modes.length;
-    const nextMode = modes[this._modeIdx];
-    if (navigator.vibrate) navigator.vibrate(40);
-    this._tryInvokeCommand(nextMode, "gesture");
+  _cycleScreens(dir) {
+    const screenOrder = ["home", "navigate", "read", "learn"];
+    const currentKey = this.currentScreen.replace("screen-", "");
+    let idx = screenOrder.indexOf(currentKey);
+    if (idx === -1) idx = 0;
+    idx = (idx + dir + screenOrder.length) % screenOrder.length;
+    this.navigateTo(screenOrder[idx]);
   }
 
   _bindKeyboardShortcuts() {
     window.addEventListener("keydown", (e) => {
       if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
       switch (e.key) {
-        case "Enter": case " ":
-          e.preventDefault();
-          if (!this.isRunning) this.startSetu();
-          else this.endSetu();
-          break;
+        case "1": this.navigateTo("home"); break;
+        case "2": this.navigateTo("navigate"); break;
+        case "3": this.navigateTo("read"); break;
+        case "4": this.navigateTo("learn"); break;
+        case "5": this._tryInvokeCommand("currency", "key"); break;
+        case "6": this._tryInvokeCommand("objects", "key"); break;
+        case "7": this._tryInvokeCommand("describe", "key"); break;
         case "Escape": case "s": case "S":
           e.preventDefault();
           this._interruptSpeech();
           break;
-        case "1": this._tryInvokeCommand("navigate", "key"); break;
-        case "2": this._tryInvokeCommand("currency", "key"); break;
-        case "3": this._tryInvokeCommand("read", "key"); break;
-        case "4": this._tryInvokeCommand("objects", "key"); break;
-        case "5": this._tryInvokeCommand("describe", "key"); break;
-        case "6": this._tryInvokeCommand("learn", "key"); break;
         case "v": case "V": case "l": case "L":
           e.preventDefault();
-          if (!this.isRunning) this.startSetu();
-          else this._sayAndWait("Listening. Speak your command.");
+          this._sayAndWait("Listening. Speak your command.");
           break;
       }
     });
   }
 
-  // -------- Always-On Voice Listener --------
-  _startVoiceListener() {
+  // -------- Voice Wake & Recognition --------
+  _startWakeListener() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) return;
     const recognizer = new SR();
@@ -298,37 +254,25 @@ class SetuMasterApp {
       const last = ev.results[ev.results.length - 1];
       if (!last) return;
       const heard = last[0].transcript.trim().toLowerCase();
-      console.log(`🎙️ Spoken utterance: "${heard}"`);
-      this._setTranscript(`Heard: “${heard}”`);
+      console.log(`🎙️ Spoken: "${heard}"`);
 
-      // 1. Check START command
-      if (this._matchesAny(heard, START_PHRASES)) {
-        this.startSetu();
+      if (this._matchesAny(heard, SNOOZE_PHRASES)) {
+        this._stopActiveMode();
+        return;
+      }
+      if (this._matchesAny(heard, RESUME_PHRASES)) {
+        this._sayAndWait("Resuming assistance.");
         return;
       }
 
-      // 2. Check END / STOP command
-      if (this._matchesAny(heard, STOP_PHRASES)) {
-        this.endSetu();
-        return;
-      }
-
-      // 3. Check SILENCE command
-      if (this._matchesAny(heard, SILENCE_PHRASES)) {
-        this._interruptSpeech();
-        return;
-      }
-
-      // 4. Feature commands (if active or starts app automatically)
       for (const [cmd, aliases] of Object.entries(COMMAND_ALIASES)) {
         for (const alias of aliases) {
           if (heard.includes(alias)) {
-            console.log(`✨ Matched command: ${cmd}`);
-            if (!this.isRunning) {
-              this.startSetu().then(() => this._tryInvokeCommand(cmd, "voice"));
-            } else {
-              this._tryInvokeCommand(cmd, "voice");
-            }
+            console.log(`✨ Voice command invoked: ${cmd}`);
+            if (cmd === "navigate") this.navigateTo("navigate");
+            else if (cmd === "read") this.navigateTo("read");
+            else if (cmd === "learn") this.navigateTo("learn");
+            else this._tryInvokeCommand(cmd, "voice");
             return;
           }
         }
@@ -346,9 +290,10 @@ class SetuMasterApp {
     return phrases.some((p) => text === p || text.startsWith(p + " ") || text.endsWith(" " + p));
   }
 
-  // -------- Feature Command Dispatcher --------
+  // -------- Core Feature Invocation --------
   _tryInvokeCommand(cmd, source) {
     this._interruptSpeech();
+    this._modeInFlight = true;
     const epoch = ++this._modeEpoch;
     this._dispatchCommand(cmd, epoch);
   }
@@ -358,24 +303,29 @@ class SetuMasterApp {
     try {
       switch (cmd) {
         case "navigate": await this._runNavigateMode(epoch); break;
-        case "currency": await this._runCurrencyMode(epoch); break;
         case "read":     await this._runReadMode(epoch); break;
+        case "learn":    await this._runLearnMode(epoch); break;
+        case "currency": await this._runCurrencyMode(epoch); break;
         case "objects":  await this._runObjectsMode(epoch); break;
         case "describe": await this._runDescribeMode(epoch); break;
-        case "learn":    await this._runLearnMode(epoch); break;
-        case "proximity":await this._runProximityMode(epoch); break;
         case "help":     await this._runHelpMode(epoch); break;
+        case "proximity":await this._runProximityMode(epoch); break;
       }
     } catch (err) {
       console.error(err);
     }
   }
 
-  // -------- Mode: Navigate --------
+  // -------- Feature 1: Navigation Mode (Screen 2) --------
   async _runNavigateMode(epoch) {
-    this._setModeHUD("warn", "🧭", "Navigate Mode", "Searching for signs & room C-214…");
+    const hazardTitle = document.getElementById("nav-hazard-title");
+    const hazardAction = document.getElementById("nav-hazard-action");
+    const targetSpeech = document.getElementById("nav-target-speech");
+    const bottomSpeech = document.getElementById("nav-bottom-speech");
+
     const b64 = this._captureFrame(HIRES_MAX_DIM, HIRES_QUALITY);
-    let speak = "Chair ahead. Move left. Room C-214 detected on your right.";
+    let speakText = "Chair ahead. Move left. Going to Room C-214, Computer Lab.";
+
     try {
       if (b64) {
         const res = await fetch("/api/navigate", {
@@ -384,17 +334,109 @@ class SetuMasterApp {
           body: JSON.stringify({ image_b64: b64, target: "C-214" }),
         });
         const data = await res.json();
+        if (data && data.speak) speakText = data.speak;
+      }
+    } catch (_) {}
+
+    if (hazardTitle) hazardTitle.textContent = "Chair ahead";
+    if (hazardAction) hazardAction.textContent = "Move left";
+    if (targetSpeech) targetSpeech.textContent = "In 10 meters, chair on your path.";
+    if (bottomSpeech) bottomSpeech.textContent = "Say “Stop” or “Repeat” any time.";
+
+    if (epoch === this._modeEpoch) {
+      await this._sayAndWait(speakText);
+    }
+  }
+
+  // -------- Feature 2: Read Text Mode (Screen 3) --------
+  async _runReadMode(epoch) {
+    await this._triggerSingleRead(epoch);
+  }
+
+  async _triggerSingleRead(epoch) {
+    const bodyEl = document.getElementById("read-extracted-content");
+    const bottomSpeech = document.getElementById("read-bottom-speech");
+
+    const b64 = this._captureFrame(HIRES_MAX_DIM, HIRES_QUALITY);
+    let speak = "Computer Science Department. Room C-214. Lab Timings: 9 AM to 5 PM.";
+
+    try {
+      if (b64) {
+        const res = await fetch("/api/ocr", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image_b64: b64 }),
+        });
+        const data = await res.json();
         if (data && data.speak) speak = data.speak;
       }
     } catch (_) {}
-    this._setModeHUD("clear", "🧭", "Navigation", speak);
-    this._setTranscript(speak);
+
+    this._lastReadText = speak;
+    if (bodyEl) {
+      bodyEl.innerHTML = `
+        <p class="ext-line bold">Computer Science Department</p>
+        <p class="ext-line bold">Room C-214</p>
+        <p class="ext-line">Lab Timings: 9 AM – 5 PM</p>
+      `;
+    }
+    if (bottomSpeech) bottomSpeech.textContent = "Reading content aloud. Swipe for more options.";
+
     await this._sayAndWait(speak);
   }
 
-  // -------- Mode: Currency (Money) --------
+  // -------- Feature 3: SETU Learn Mode (Screen 4) --------
+  async _runLearnMode(epoch) {
+    const dialogueEl = document.getElementById("learn-dialogue-content");
+    const bottomSpeech = document.getElementById("learn-bottom-speech");
+
+    const intro = "SETU Learn. Current section: Virtual Memory. You can read aloud, explain simply, ask questions, or take a quiz.";
+    if (dialogueEl) {
+      dialogueEl.textContent = "A page fault happens when the needed page is not in memory. I'll explain more if you ask.";
+    }
+    if (bottomSpeech) bottomSpeech.textContent = "Ask a question or choose an option.";
+    await this._sayAndWait(intro);
+  }
+
+  async _runLearnAction(action) {
+    this._interruptSpeech();
+    const dialogueEl = document.getElementById("learn-dialogue-content");
+    let url = "/api/learn/explain";
+    let payload = { topic: this._currentLearnTopic };
+
+    if (action === "read") {
+      const readText = "Virtual memory allows the operating system to map virtual addresses to physical RAM, creating an illusion of large continuous memory.";
+      if (dialogueEl) dialogueEl.textContent = readText;
+      await this._sayAndWait(readText);
+      return;
+    } else if (action === "explain") {
+      url = "/api/learn/explain";
+    } else if (action === "ask") {
+      url = "/api/learn/ask";
+      payload.question = "What is a page fault?";
+    } else if (action === "quiz") {
+      url = "/api/learn/quiz";
+    }
+
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      const speak = data.speak || "A page fault happens when the needed page is not in memory.";
+      if (dialogueEl) dialogueEl.textContent = speak;
+      await this._sayAndWait(speak);
+    } catch (_) {
+      const fallback = "A page fault happens when the needed page is not in memory. I'll explain more if you ask.";
+      if (dialogueEl) dialogueEl.textContent = fallback;
+      await this._sayAndWait(fallback);
+    }
+  }
+
+  // -------- Mode: Currency (Indian Banknotes) --------
   async _runCurrencyMode(epoch) {
-    this._setModeHUD("mode", "₹", "Currency Scanner", "Scanning Indian banknotes…");
     const b64 = this._captureFrame(HIRES_MAX_DIM, HIRES_QUALITY);
     let speak = "500 rupees note.";
     try {
@@ -408,37 +450,13 @@ class SetuMasterApp {
         if (data && data.speak) speak = data.speak;
       }
     } catch (_) {}
-    this._setModeHUD("clear", "₹", "Money Result", speak);
-    this._setTranscript(speak);
     await this._sayAndWait(speak);
   }
 
-  // -------- Mode: Read Text --------
-  async _runReadMode(epoch) {
-    this._setModeHUD("mode", "📖", "Read Text", "Extracting & refining text…");
-    const b64 = this._captureFrame(HIRES_MAX_DIM, HIRES_QUALITY);
-    let speak = "Computer Science Department. Room C-214. Lab Timings: 9 AM to 5 PM.";
-    try {
-      if (b64) {
-        const res = await fetch("/api/ocr", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ image_b64: b64 }),
-        });
-        const data = await res.json();
-        if (data && data.speak) speak = data.speak;
-      }
-    } catch (_) {}
-    this._setModeHUD("clear", "📖", "Read Content", speak);
-    this._setTranscript(speak);
-    await this._sayAndWait(speak);
-  }
-
-  // -------- Mode: Explore Objects --------
+  // -------- Mode: Objects (Explore) --------
   async _runObjectsMode(epoch) {
-    this._setModeHUD("mode", "📦", "Explore", "Scanning surrounding objects…");
     const b64 = this._captureFrame(HIRES_MAX_DIM, HIRES_QUALITY);
-    let speak = "Chair in front of you. Table on your right.";
+    let speak = "Chair directly in front of you. Table on your right.";
     try {
       if (b64) {
         const res = await fetch("/api/objects", {
@@ -450,14 +468,11 @@ class SetuMasterApp {
         if (data && data.speak) speak = data.speak;
       }
     } catch (_) {}
-    this._setModeHUD("clear", "📦", "Objects Ahead", speak);
-    this._setTranscript(speak);
     await this._sayAndWait(speak);
   }
 
-  // -------- Mode: Describe Scene --------
+  // -------- Mode: Describe --------
   async _runDescribeMode(epoch) {
-    this._setModeHUD("mode", "👁️", "Describe", "Understanding scene with AI…");
     const b64 = this._captureFrame(HIRES_MAX_DIM, HIRES_QUALITY);
     let speak = "You are in a hallway outside Room C-214 with a clear pathway ahead.";
     try {
@@ -471,109 +486,63 @@ class SetuMasterApp {
         if (data && data.speak) speak = data.speak;
       }
     } catch (_) {}
-    this._setModeHUD("clear", "👁️", "Scene Description", speak);
-    this._setTranscript(speak);
     await this._sayAndWait(speak);
   }
 
-  // -------- Mode: SETU Learn --------
-  async _runLearnMode(epoch) {
-    this._setModeHUD("mode", "🎓", "SETU Learn", "Current Section: Virtual Memory");
-    let speak = "SETU Learn. Virtual memory maps virtual addresses to physical RAM. Say Explain, Quiz, or Ask.";
-    try {
-      const res = await fetch("/api/learn/explain", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic: this._currentLearnTopic }),
-      });
-      const data = await res.json();
-      if (data && data.speak) speak = data.speak;
-    } catch (_) {}
-    this._setModeHUD("clear", "🎓", "Learn Tutor", speak);
-    this._setTranscript(speak);
-    await this._sayAndWait(speak);
-  }
-
-  // -------- Mode: Proximity Check --------
+  // -------- Mode: Proximity --------
   async _runProximityMode(epoch) {
-    this._setModeHUD("clear", "🛡️", "Proximity Check", "Path is clear.");
-    const speak = "Proximity watch active. Path is clear.";
-    this._setTranscript(speak);
+    const b64 = this._captureFrame(HIRES_MAX_DIM, HIRES_QUALITY);
+    let speak = "Proximity watch active. Path is clear.";
+    try {
+      if (b64) {
+        const res = await fetch("/api/proximity", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image_b64: b64 }),
+        });
+        const data = await res.json();
+        if (data && data.speak) speak = data.speak;
+      }
+    } catch (_) {}
     await this._sayAndWait(speak);
   }
 
   // -------- Mode: Help --------
   async _runHelpMode(epoch) {
-    const help = "Welcome to SETU. Say Start SETU to begin, and End SETU to stop. Double-tap to speak, swipe to switch modes, and tap with two fingers to silence.";
-    this._setTranscript(help);
+    const help = "Welcome to SETU. Voice first. Always. Say Navigate, Read, Learn, Money, Explore, or Describe. Swipe left or right to switch screens. Tap with two fingers to silence.";
     await this._sayAndWait(help);
   }
 
-  // -------- UI Helpers --------
-  _setModeHUD(state, icon, label, detail) {
-    const card = document.getElementById("mode-card");
-    const iconEl = document.getElementById("mode-icon");
-    const labelEl = document.getElementById("mode-label");
-    const detailEl = document.getElementById("mode-detail");
-
-    if (card) card.dataset.state = state;
-    if (iconEl) iconEl.textContent = icon;
-    if (labelEl) labelEl.textContent = label;
-    if (detailEl) detailEl.textContent = detail;
+  // -------- Controls Helpers --------
+  _stopActiveMode() {
+    this._interruptSpeech();
+    this._modeEpoch++;
+    this.navigateTo("home");
+    this._sayAndWait("Navigation stopped.");
   }
 
-  _setTranscript(text) {
-    const el = document.getElementById("transcript");
-    if (el) el.textContent = text;
+  _repeatLastGuidance() {
+    this._runNavigateMode(this._modeEpoch);
   }
 
-  // -------- WebSocket Collision Stream --------
+  _repeatLastReadText() {
+    if (this._lastReadText) this._sayAndWait(this._lastReadText);
+    else this._triggerSingleRead(this._modeEpoch);
+  }
+
+  _returnToCollision() {
+    this.state = "idle";
+    this._modeInFlight = false;
+  }
+
+  // -------- WebSocket & Frame Capture --------
   _connectWebSocket() {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const url = `${proto}//${location.host}/ws/stream`;
     try {
       this.ws = new WebSocket(url);
       this.ws.onopen = () => { this.wsReady = true; };
-      this.ws.onmessage = (ev) => this._onWsMessage(ev);
-      this.ws.onclose = () => { this.wsReady = false; };
-    } catch (_) {}
-  }
-
-  _startCollisionStream() {
-    this._stopCollisionStream();
-    this._collisionTimer = setInterval(() => {
-      if (!this.isRunning || !this.wsReady || !this.ws || this.ws.readyState !== 1) return;
-      const b64 = this._captureFrame(320, 0.45);
-      if (!b64) return;
-      this.ws.send(JSON.stringify({
-        type: "frame",
-        mode: "collision",
-        image_b64: b64,
-        seq: ++this._collisionSeq,
-      }));
-    }, COLLISION_INTERVAL_MS);
-  }
-
-  _stopCollisionStream() {
-    if (this._collisionTimer) {
-      clearInterval(this._collisionTimer);
-      this._collisionTimer = null;
-    }
-  }
-
-  _onWsMessage(ev) {
-    try {
-      const msg = JSON.parse(ev.data);
-      if (msg.mode === "collision" && msg.speak) {
-        if (msg.collision_alert === "urgent") {
-          this._setModeHUD("urgent", "🛑", "STOP ALERT", msg.speak);
-          if (navigator.vibrate) navigator.vibrate([400, 100, 400]);
-        } else if (msg.collision_alert === "warn") {
-          this._setModeHUD("warn", "⚠️", "Hazard Warning", msg.speak);
-          if (navigator.vibrate) navigator.vibrate([120, 60, 120]);
-        }
-        this._speak(msg.speak);
-      }
+      this.ws.onclose = () => { this.wsReady = false; setTimeout(() => this._connectWebSocket(), 2000); };
     } catch (_) {}
   }
 
@@ -593,9 +562,6 @@ class SetuMasterApp {
     if (this.currentAudio) {
       try { this.currentAudio.pause(); } catch (_) {}
       this.currentAudio = null;
-    }
-    if ("speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
     }
   }
 
@@ -662,7 +628,9 @@ class SetuMasterApp {
   }
 }
 
+// Start app on DOMContentLoaded
 window.addEventListener("DOMContentLoaded", () => {
-  const app = new SetuMasterApp();
+  const app = new SetuApp();
   window.setuApp = app;
+  app.start();
 });
