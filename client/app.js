@@ -528,9 +528,12 @@ class SetuApp {
     if (!heard) return;
     if (this.transcript) this.transcript.textContent = `heard: “${heard}”`;
 
+    // Only process finalized segments to prevent double-triggering
+    if (!last.isFinal) return;
+
     const now = Date.now();
 
-    // 1. Snooze / mute / stop
+    // 1. Snooze / mute / stop (always allowed to interrupt)
     if (this._matchesAny(heard, SNOOZE_PHRASES)) {
       this._lastActionAt = now;
       this._interruptSpeech();
@@ -540,6 +543,9 @@ class SetuApp {
       this._speak("Stopped.");
       return;
     }
+
+    // If currently processing a command, ignore new command triggers
+    if (this.state === "processing") return;
 
     // 2. Resume / unmute
     if (this._matchesAny(heard, RESUME_PHRASES)) {
