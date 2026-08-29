@@ -209,6 +209,19 @@ body {
   animation: pulse-ring 1.4s infinite cubic-bezier(0.4, 0, 0.6, 1);
 }
 
+.badge.speaking {
+  color: #0b0f14;
+  background: linear-gradient(135deg, var(--accent-amber), #f59e0b);
+  border-color: rgba(245, 158, 11, 0.8);
+  box-shadow: 0 0 20px rgba(245, 158, 11, 0.5);
+}
+
+.badge.speaking .pulse-dot {
+  background: #0b0f14;
+  box-shadow: 0 0 0 0 rgba(11, 15, 20, 0.7);
+  animation: pulse-ring 0.8s infinite cubic-bezier(0.4, 0, 0.6, 1);
+}
+
 @keyframes pulse-ring {
   0% { box-shadow: 0 0 0 0 rgba(11, 15, 20, 0.6); }
   70% { box-shadow: 0 0 0 8px rgba(11, 15, 20, 0); }

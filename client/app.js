@@ -96,6 +96,12 @@ class SetuApp {
     this._modeEpoch = 0;
     this._modeInFlight = false;
     this._lastReadText = "";
+
+    // Speech & microphone synchronization locks
+    this._isSpeaking = false;
+    this._speechLockCount = 0;
+    this._micResumeTimer = null;
+    this._activeUtterance = null;
   }
 
   _epochLive(epoch) {
@@ -444,7 +450,8 @@ class SetuApp {
   }
 
   _spawnRecognizer() {
-    if (!this._wakeWantsToRun || this._recognizerPaused) return;
+    // Never turn on microphone while SETU is speaking, paused, or recording audio
+    if (!this._wakeWantsToRun || this._recognizerPaused || this._isSpeaking || this.state === "recording") return;
     const gen = ++this._recognizerGen;
     const r = new this._SR();
     r.continuous = true;
@@ -453,10 +460,15 @@ class SetuApp {
 
     r.onstart = () => {
       if (gen !== this._recognizerGen) return;
+      if (this._isSpeaking || this.state === "recording") {
+        try { r.abort(); } catch (_) {}
+        return;
+      }
       this._badge("Listening", true);
     };
     r.onresult = (ev) => {
       if (gen !== this._recognizerGen) return;
+      if (this._isSpeaking || this.state === "recording") return;
       this._onSpeechResult(ev);
     };
     r.onerror = (e) => {
@@ -468,9 +480,15 @@ class SetuApp {
     };
     r.onend = () => {
       if (gen !== this._recognizerGen) return;
+      if (this._isSpeaking) {
+        this._badge("Speaking 🔊", false, "speaking");
+        return;
+      }
       this._badge("…", false);
       clearTimeout(this.recognizerRestartTimer);
-      this.recognizerRestartTimer = setTimeout(() => this._spawnRecognizer(), 300);
+      if (!this._recognizerPaused && !this._isSpeaking && this.state !== "recording") {
+        this.recognizerRestartTimer = setTimeout(() => this._spawnRecognizer(), 300);
+      }
     };
 
     this.speechRecognizer = r;
@@ -479,7 +497,9 @@ class SetuApp {
     } catch (e) {
       if (gen !== this._recognizerGen) return;
       clearTimeout(this.recognizerRestartTimer);
-      this.recognizerRestartTimer = setTimeout(() => this._spawnRecognizer(), 500);
+      if (!this._recognizerPaused && !this._isSpeaking) {
+        this.recognizerRestartTimer = setTimeout(() => this._spawnRecognizer(), 500);
+      }
     }
   }
 
@@ -489,16 +509,19 @@ class SetuApp {
     clearTimeout(this.recognizerRestartTimer);
     if (this.speechRecognizer) {
       try { this.speechRecognizer.abort(); } catch (_) {}
+      this.speechRecognizer = null;
     }
   }
 
   _resumeRecognizer() {
+    if (this._isSpeaking || this.state === "recording" || !this._wakeWantsToRun) return;
     this._recognizerPaused = false;
     clearTimeout(this.recognizerRestartTimer);
-    this.recognizerRestartTimer = setTimeout(() => this._spawnRecognizer(), 300);
+    this.recognizerRestartTimer = setTimeout(() => this._spawnRecognizer(), 150);
   }
 
   _onSpeechResult(ev) {
+    if (this._isSpeaking || this.state === "recording") return;
     const last = ev.results[ev.results.length - 1];
     if (!last) return;
     let heard = (last[0] && last[0].transcript ? last[0].transcript : "").trim().toLowerCase();
@@ -908,11 +931,12 @@ class SetuApp {
     if (this.modeDetail) this.modeDetail.textContent = detail || "";
   }
 
-  _badge(text, listening) {
+  _badge(text, listening, customClass = "") {
     if (!this.listenBadge) return;
     const textEl = this.listenBadge.querySelector(".badge-text") || this.listenBadge;
     textEl.textContent = text;
     this.listenBadge.classList.toggle("listening", !!listening);
+    this.listenBadge.classList.toggle("speaking", customClass === "speaking");
   }
 
   _footer(text) {
@@ -921,50 +945,108 @@ class SetuApp {
 
   _sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-  // -------- Audio & TTS Engine --------
+  // -------- Audio & TTS Engine with Strict Microphone Isolation --------
+  _acquireSpeechLock() {
+    this._speechLockCount++;
+    this._isSpeaking = true;
+    clearTimeout(this._micResumeTimer);
+    this._pauseRecognizer();
+    this._badge("Speaking 🔊", false, "speaking");
+  }
+
+  _releaseSpeechLock() {
+    this._speechLockCount = Math.max(0, this._speechLockCount - 1);
+    if (this._speechLockCount === 0) {
+      this._isSpeaking = false;
+      this._badge("…", false);
+      clearTimeout(this._micResumeTimer);
+      // Acoustic grace period: allow speaker room echo and reverberation to decay
+      // before reopening microphone speech recognition.
+      this._micResumeTimer = setTimeout(() => {
+        if (!this._isSpeaking && this.state !== "recording" && this._wakeWantsToRun) {
+          this._resumeRecognizer();
+        }
+      }, 280);
+    }
+  }
+
   _interruptSpeech() {
     if (this.currentAudio) {
       try { this.currentAudio.pause(); } catch (_) {}
       this.currentAudio = null;
     }
+    if (window.speechSynthesis && window.speechSynthesis.speaking) {
+      try { window.speechSynthesis.cancel(); } catch (_) {}
+    }
+    this._activeUtterance = null;
+    clearTimeout(this._micResumeTimer);
+    this._speechLockCount = 0;
+    this._isSpeaking = false;
+    if (this.state !== "recording" && this._wakeWantsToRun) {
+      this._resumeRecognizer();
+    }
   }
 
   async _speak(text, { interrupt = true } = {}) {
-    if (!text) return;
+    if (!text || !text.trim()) return;
     if (interrupt) this._interruptSpeech();
+    this._acquireSpeechLock();
+
     try {
       const res = await fetch("/api/tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
       });
-      if (!res.ok) return;
+      if (!res.ok) throw new Error(`TTS server error: ${res.status}`);
+
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
       this.currentAudio = audio;
-      audio.play().catch(() => {});
-      audio.onended = () => {
+
+      let ended = false;
+      const cleanup = () => {
+        if (ended) return;
+        ended = true;
         URL.revokeObjectURL(url);
         if (this.currentAudio === audio) this.currentAudio = null;
+        this._releaseSpeechLock();
       };
-    } catch (_) {}
+
+      audio.onended = cleanup;
+      audio.onerror = cleanup;
+      audio.play().catch((err) => {
+        console.warn("Audio play failed, falling back:", err);
+        cleanup();
+      });
+
+      const safetyMs = Math.max(8000, Math.round((text.length / 10) * 1000) + 5000);
+      setTimeout(cleanup, safetyMs);
+    } catch (err) {
+      console.warn("TTS server error, using browser speech fallback:", err);
+      this._speakWithBrowserFallback(text);
+    }
   }
 
   async _sayAndWait(text) {
-    if (!text) return;
+    if (!text || !text.trim()) return;
     this._interruptSpeech();
+    this._acquireSpeechLock();
+
     try {
       const res = await fetch("/api/tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
       });
-      if (!res.ok) return;
+      if (!res.ok) throw new Error(`TTS server error: ${res.status}`);
+
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
       this.currentAudio = audio;
+
       await new Promise((resolve) => {
         let done = false;
         const cleanup = () => {
@@ -980,7 +1062,60 @@ class SetuApp {
         const safetyMs = Math.max(12000, Math.round((text.length / 10) * 1000) + 8000);
         setTimeout(cleanup, safetyMs);
       });
-    } catch (_) {}
+    } catch (err) {
+      console.warn("TTS server error, using browser speech fallback:", err);
+      await this._sayAndWaitBrowserFallback(text);
+    } finally {
+      this._releaseSpeechLock();
+    }
+  }
+
+  _speakWithBrowserFallback(text) {
+    if (!window.speechSynthesis) {
+      this._releaseSpeechLock();
+      return;
+    }
+    try {
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = "en-US";
+      u.rate = 1.0;
+      u.onend = () => this._releaseSpeechLock();
+      u.onerror = () => this._releaseSpeechLock();
+      this._activeUtterance = u;
+      window.speechSynthesis.speak(u);
+    } catch (_) {
+      this._releaseSpeechLock();
+    }
+  }
+
+  _sayAndWaitBrowserFallback(text) {
+    return new Promise((resolve) => {
+      if (!window.speechSynthesis) {
+        resolve();
+        return;
+      }
+      try {
+        const u = new SpeechSynthesisUtterance(text);
+        u.lang = "en-US";
+        u.rate = 1.0;
+        let resolved = false;
+        const done = () => {
+          if (!resolved) {
+            resolved = true;
+            this._activeUtterance = null;
+            resolve();
+          }
+        };
+        u.onend = done;
+        u.onerror = done;
+        this._activeUtterance = u;
+        window.speechSynthesis.speak(u);
+        const safetyMs = Math.max(6000, Math.round((text.length / 10) * 1000) + 3000);
+        setTimeout(done, safetyMs);
+      } catch (_) {
+        resolve();
+      }
+    });
   }
 }
 
