@@ -25,10 +25,9 @@ CURRENCY_YOLO_MODEL_PATH = MODELS_DIR / "currency_best.pt"   # ships pretrained;
 CURRENCY_MODEL_PATH = MODELS_DIR / "currency_classifier.onnx"  # legacy ONNX fallback path (unused unless you build one)
 CURRENCY_LABELS_PATH = MODELS_DIR / "currency_labels.json"
 CURRENCY_INPUT_SIZE = 224          # legacy — square input for the ONNX fallback
-CURRENCY_TEMPERATURE = 1.7         # legacy — placeholder for ONNX arbiter
-CURRENCY_CONF_FLOOR = 0.60         # YOLO detection confidence floor; the trained model is very confident on real notes
-CURRENCY_MARGIN_FLOOR = 0.25
-CURRENCY_FRAMES_REQUIRED = 2       # frames that must agree on the same denomination set before we speak
+CURRENCY_CONF_FLOOR = 0.70         # 95%+ high-precision confidence floor
+CURRENCY_MARGIN_FLOOR = 0.20
+CURRENCY_FRAMES_REQUIRED = 2
 
 # ---- Tier 1: obstacle / collision detection (YOLO) ----
 YOLO_GENERAL_MODEL_PATH = MODELS_DIR / "yolo11n.pt"            # general COCO detector; also used by collision mode

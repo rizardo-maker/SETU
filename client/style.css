@@ -1,162 +1,634 @@
-/* Voice-first minimal UI. The screen is not the primary interface —
-   the audio + haptic channel is — but a low-vision sighted tester
-   should be able to see what's happening at a glance. High contrast,
-   big text, one card at the centre. */
+/* ==========================================================================
+   SETU — Complete Accessible & High-Contrast Design System for Blind & Low-Vision
+   Features:
+     - Screen-wide Gesture Touch Overlay
+     - High-Contrast Accessible Typography
+     - Keyboard & Screen Reader Friendly Focus Rings
+     - Responsive Glassmorphic Grid & HUD
+   ========================================================================== */
 
 :root {
-  --bg: #0b0f14;
-  --fg: #f2f5f7;
-  --accent: #ffb020;
-  --muted: #93a1ad;
-  --success: #10b981;
-  --warn: #f59e0b;
-  --danger: #ef4444;
-  --card-bg: #121a24;
-  --card-border: #263241;
+  /* Core Obsidian Canvas */
+  --bg-deep: #05070b;
+  --bg-surface: #0a0e17;
+  --bg-card: rgba(14, 20, 31, 0.76);
+  --bg-card-hover: rgba(24, 34, 52, 0.9);
+  
+  /* Text & Contrast */
+  --text-primary: #ffffff;
+  --text-secondary: #cbd5e1;
+  --text-muted: #94a3b8;
+  
+  /* State Accents */
+  --accent-cyan: #06b6d4;
+  --accent-indigo: #6366f1;
+  --accent-violet: #8b5cf6;
+  --accent-amber: #f59e0b;
+  --accent-gold: #fbbf24;
+  --accent-emerald: #10b981;
+  --accent-crimson: #ef4444;
+  --accent-coral: #f97316;
+
+  /* State Auras */
+  --aura-clear: rgba(16, 185, 129, 0.28);
+  --aura-warn: rgba(245, 158, 11, 0.35);
+  --aura-urgent: rgba(239, 68, 68, 0.55);
+  --aura-mode: rgba(99, 102, 241, 0.35);
+  --aura-listen: rgba(6, 182, 212, 0.35);
+
+  /* Geometry & Glass */
+  --radius-lg: 20px;
+  --radius-md: 14px;
+  --radius-sm: 8px;
+  --glass-border: rgba(255, 255, 255, 0.12);
+  --glass-blur: blur(18px);
+  
+  /* Typography */
+  --font-heading: 'Outfit', -apple-system, sans-serif;
+  --font-body: 'Plus Jakarta Sans', -apple-system, sans-serif;
 }
 
-* { box-sizing: border-box; }
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  -webkit-tap-highlight-color: transparent;
+}
 
 body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--fg);
-  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  background-color: var(--bg-deep);
+  color: var(--text-primary);
+  font-family: var(--font-body);
   min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  justify-content: center;
+  overflow-x: hidden;
+  position: relative;
+  -webkit-font-smoothing: antialiased;
 }
+
+/* Ambient Radial Glow */
+.ambient-bg-glow {
+  position: fixed;
+  top: -15%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 120vw;
+  height: 60vh;
+  background: radial-gradient(circle, rgba(99, 102, 241, 0.14) 0%, rgba(6, 182, 212, 0.06) 45%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.app-container {
+  width: 100%;
+  max-width: 600px;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  padding: 0.75rem 1rem 1.75rem;
+  position: relative;
+  z-index: 1;
+}
+
+/* Accessible Focus Outlines for Blind & Keyboard Users */
+*:focus-visible {
+  outline: 3px solid var(--accent-cyan) !important;
+  outline-offset: 3px !important;
+  box-shadow: 0 0 16px var(--accent-cyan) !important;
+}
+
+/* ==========================================================================
+   Top Header Bar
+   ========================================================================== */
 
 .topbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 0.75rem 1rem;
-  border-bottom: 1px solid #1c2530;
+  padding: 0.65rem 0.5rem 0.95rem;
+  border-bottom: 1px solid var(--glass-border);
 }
 
-.topbar h1 {
-  font-size: 1.25rem;
-  margin: 0;
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.brand-icon {
+  font-size: 1.65rem;
+  line-height: 1;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--glass-border);
+  padding: 0.35rem 0.45rem;
+  border-radius: var(--radius-sm);
+}
+
+.brand-text h1 {
+  font-family: var(--font-heading);
+  font-size: 1.5rem;
+  font-weight: 800;
   letter-spacing: 0.08em;
+  background: linear-gradient(135deg, #ffffff 0%, #cbd5e1 55%, var(--accent-cyan) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  line-height: 1.1;
+}
+
+.brand-sub {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+}
+
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.icon-chip-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--glass-border);
+  padding: 0.4rem 0.8rem;
+  border-radius: 999px;
+  cursor: pointer;
+  backdrop-filter: var(--glass-blur);
+  transition: all 0.2s ease;
+}
+
+.icon-chip-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: var(--accent-cyan);
 }
 
 .badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
   font-size: 0.8rem;
-  color: var(--muted);
-  padding: 0.25rem 0.5rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+  padding: 0.4rem 0.85rem;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: var(--glass-blur);
+  transition: all 0.25s ease;
+}
+
+.pulse-dot {
+  width: 8.5px;
+  height: 8.5px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: all 0.25s ease;
 }
 
 .badge.listening {
   color: #0b0f14;
-  background: var(--accent);
-  font-weight: 600;
+  background: linear-gradient(135deg, var(--accent-cyan), #38bdf8);
+  border-color: rgba(6, 182, 212, 0.8);
+  box-shadow: 0 0 20px rgba(6, 182, 212, 0.5);
 }
 
-main {
+.badge.listening .pulse-dot {
+  background: #0b0f14;
+  box-shadow: 0 0 0 0 rgba(11, 15, 20, 0.7);
+  animation: pulse-ring 1.4s infinite cubic-bezier(0.4, 0, 0.6, 1);
+}
+
+@keyframes pulse-ring {
+  0% { box-shadow: 0 0 0 0 rgba(11, 15, 20, 0.6); }
+  70% { box-shadow: 0 0 0 8px rgba(11, 15, 20, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(11, 15, 20, 0); }
+}
+
+/* ==========================================================================
+   Main Content & Camera HUD
+   ========================================================================== */
+
+.main-content {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
-  padding: 1rem;
-  max-width: 640px;
-  margin: 0 auto;
+  gap: 0.95rem;
+  margin-top: 0.85rem;
+}
+
+.camera-card {
+  position: relative;
+  width: 100%;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: #000;
+  border: 2px solid var(--glass-border);
+  box-shadow: 0 10px 30px -5px rgba(0, 0, 0, 0.8);
+}
+
+.video-wrapper {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 3;
 }
 
 video {
   width: 100%;
-  border-radius: 12px;
-  background: #000;
-  aspect-ratio: 4 / 3;
+  height: 100%;
   object-fit: cover;
+  transform: scaleX(-1);
+  -webkit-transform: scaleX(-1);
+  display: block;
 }
 
-/* The single central card that swaps state between "collision watch"
-   and the active mode. Big, high contrast, colour-coded by state. */
+/* HUD Overlay Frame */
+.hud-frame {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.corner {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  border-color: rgba(6, 182, 212, 0.8);
+  border-style: solid;
+}
+
+.corner.tl { top: 12px; left: 12px; border-width: 3px 0 0 3px; border-top-left-radius: 6px; }
+.corner.tr { top: 12px; right: 12px; border-width: 3px 3px 0 0; border-top-right-radius: 6px; }
+.corner.bl { bottom: 12px; left: 12px; border-width: 0 0 3px 3px; border-bottom-left-radius: 6px; }
+.corner.br { bottom: 12px; right: 12px; border-width: 0 3px 3px 0; border-bottom-right-radius: 6px; }
+
+.scanner-laser {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2.5px;
+  background: linear-gradient(90deg, transparent 0%, rgba(6, 182, 212, 0.9) 50%, transparent 100%);
+  box-shadow: 0 0 14px rgba(6, 182, 212, 0.9);
+  animation: scan-vertical 3.5s ease-in-out infinite alternate;
+}
+
+@keyframes scan-vertical {
+  0% { top: 5%; opacity: 0.2; }
+  50% { opacity: 0.95; }
+  100% { top: 95%; opacity: 0.2; }
+}
+
+/* ==========================================================================
+   Central Reactive Mode HUD Card (Accessible Tactile Target)
+   ========================================================================== */
+
 .mode-card {
-  padding: 1.5rem 1.25rem;
-  border-radius: 16px;
-  background: var(--card-bg);
-  border: 3px solid var(--card-border);
-  text-align: center;
-  transition: border-color 0.2s ease, background 0.2s ease;
+  position: relative;
+  padding: 1.4rem 1.3rem;
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+  border: 2px solid var(--glass-border);
+  backdrop-filter: var(--glass-blur);
+  cursor: pointer;
+  overflow: hidden;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  min-height: 100px;
 }
 
-.mode-card[data-state="idle"]    { border-color: var(--card-border); }
-.mode-card[data-state="clear"]   { border-color: var(--success); }
-.mode-card[data-state="warn"]    { border-color: var(--warn); background: #2a1a05; }
-.mode-card[data-state="urgent"]  { border-color: var(--danger); background: #3a0f0f; animation: pulse 0.6s ease-in-out infinite alternate; }
-.mode-card[data-state="mode"]    { border-color: var(--accent); background: #241d0f; }
-.mode-card[data-state="listen"]  { border-color: #2563eb; background: #0f1a2e; }
-
-@keyframes pulse {
-  from { transform: scale(1); }
-  to   { transform: scale(1.03); }
+.card-glass-glow {
+  position: absolute;
+  inset: 0;
+  opacity: 0.15;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
 }
 
-.mode-icon  { font-size: 3rem; line-height: 1; }
-.mode-label { font-size: 1.5rem; font-weight: 700; margin-top: 0.5rem; }
-.mode-detail { font-size: 1rem; color: var(--muted); margin-top: 0.4rem; min-height: 1.4em; }
+.mode-card-inner {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  z-index: 1;
+}
+
+.mode-icon {
+  font-size: 3rem;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: transform 0.25s ease;
+}
+
+.mode-card:hover .mode-icon {
+  transform: scale(1.1);
+}
+
+.mode-text-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  text-align: left;
+  flex: 1;
+  min-width: 0;
+}
+
+.mode-label {
+  font-family: var(--font-heading);
+  font-size: 1.45rem;
+  font-weight: 800;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.mode-detail {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+/* Mode Card Dynamic State Stylings */
+.mode-card[data-state="clear"] {
+  border-color: rgba(16, 185, 129, 0.55);
+  box-shadow: 0 0 28px var(--aura-clear);
+}
+.mode-card[data-state="clear"] .card-glass-glow {
+  background: radial-gradient(circle at top left, var(--accent-emerald), transparent 70%);
+}
+
+.mode-card[data-state="warn"] {
+  border-color: rgba(245, 158, 11, 0.7);
+  background: rgba(38, 24, 6, 0.88);
+  box-shadow: 0 0 32px var(--aura-warn);
+}
+.mode-card[data-state="warn"] .mode-label {
+  color: var(--accent-gold);
+}
+
+.mode-card[data-state="urgent"] {
+  border-color: var(--accent-crimson);
+  background: rgba(50, 10, 10, 0.95);
+  box-shadow: 0 0 40px var(--aura-urgent);
+  animation: urgent-pulse 0.7s ease-in-out infinite alternate;
+}
+.mode-card[data-state="urgent"] .mode-label {
+  color: #ff6b6b;
+}
+
+@keyframes urgent-pulse {
+  from { transform: scale(1); box-shadow: 0 0 20px var(--aura-urgent); }
+  to   { transform: scale(1.025); box-shadow: 0 0 50px rgba(239, 68, 68, 0.8); }
+}
+
+.mode-card[data-state="mode"] {
+  border-color: rgba(99, 102, 241, 0.65);
+  box-shadow: 0 0 28px var(--aura-mode);
+}
+
+.mode-card[data-state="listen"] {
+  border-color: rgba(6, 182, 212, 0.75);
+  background: rgba(8, 28, 48, 0.9);
+  box-shadow: 0 0 34px var(--aura-listen);
+}
+
+/* ==========================================================================
+   Blind-Accessible Gesture Guide Bar
+   ========================================================================== */
+
+.gesture-guide-bar {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.45rem;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  padding: 0.55rem 0.75rem;
+}
+
+.guide-item {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.guide-key {
+  color: var(--accent-cyan);
+  background: rgba(6, 182, 212, 0.12);
+  border: 1px solid rgba(6, 182, 212, 0.3);
+  padding: 0.12rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+/* ==========================================================================
+   Voice Command Helper Hint
+   ========================================================================== */
 
 .wake-hint {
-  text-align: center;
-  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.65rem 0.95rem;
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--glass-border);
+  color: var(--text-secondary);
   font-size: 0.9rem;
-  margin: 0;
-  padding: 0.5rem 0.75rem;
-  background: rgba(255, 255, 255, 0.04);
-  border-radius: 8px;
+  text-align: center;
 }
 
-.wake-hint b { color: var(--accent); font-weight: 600; }
-
-/* Command words are real <button>s (tap = same dispatch path as voice)
-   but need to read as inline emphasized text within the sentence, not
-   as boxed UI chrome. */
-.cmd-word {
-  display: inline;
-  padding: 0.15rem 0.3rem;
-  margin: 0 -0.1rem;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--accent);
-  font-weight: 600;
-  font-size: inherit;
-  font-family: inherit;
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
+.mic-glyph {
+  font-size: 1.1rem;
 }
 
-.cmd-word:hover,
-.cmd-word:focus-visible {
-  background: rgba(255, 176, 32, 0.18);
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+.wake-hint b {
+  color: var(--accent-cyan);
+  font-weight: 700;
 }
 
-.cmd-word:active {
-  background: rgba(255, 176, 32, 0.3);
+/* ==========================================================================
+   Live Speech & AI Transcript Bar
+   ========================================================================== */
+
+.transcript-wrapper {
+  background: rgba(10, 14, 23, 0.85);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  padding: 0.85rem 1.1rem;
+  border-left: 4px solid var(--accent-cyan);
 }
 
-.cmd-word:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
+.transcript-header {
+  display: flex;
+  align-items: center;
+  margin-bottom: 0.3rem;
+}
+
+.transcript-label {
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
 }
 
 #transcript {
-  font-size: 1rem;
-  min-height: 1.4em;
-  color: var(--muted);
-  font-style: italic;
-  padding: 0.5rem 0.75rem;
-  border-left: 3px solid var(--accent);
-  background: rgba(255, 255, 255, 0.03);
-  border-radius: 4px;
+  font-size: 1.02rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.5;
+  min-height: 1.5em;
+  word-break: break-word;
+}
+
+/* ==========================================================================
+   Accessible Tactile Mode Action Grid
+   ========================================================================== */
+
+.actions-section {
+  width: 100%;
+}
+
+.actions-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.8rem;
+}
+
+.action-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  background: var(--bg-card);
+  border: 2px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  padding: 1.05rem 0.95rem;
+  text-align: left;
+  cursor: pointer;
+  backdrop-filter: var(--glass-blur);
+  transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+  min-height: 72px;
+}
+
+.btn-icon {
+  font-size: 1.85rem;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: transform 0.2s ease;
+}
+
+.btn-text-wrap {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.btn-title {
+  font-family: var(--font-heading);
+  font-size: 1.15rem;
+  font-weight: 800;
+  color: var(--text-primary);
+  line-height: 1.15;
+}
+
+.btn-sub {
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-top: 0.2rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Button Glow Accents */
+.btn-navigate:hover, .btn-navigate:focus-visible  { border-color: var(--accent-cyan); box-shadow: 0 0 20px rgba(6, 182, 212, 0.3); }
+.btn-currency:hover, .btn-currency:focus-visible  { border-color: var(--accent-emerald); box-shadow: 0 0 20px rgba(16, 185, 129, 0.3); }
+.btn-objects:hover, .btn-objects:focus-visible   { border-color: var(--accent-coral); box-shadow: 0 0 20px rgba(249, 115, 22, 0.3); }
+.btn-proximity:hover, .btn-proximity:focus-visible { border-color: var(--accent-crimson); box-shadow: 0 0 20px rgba(239, 68, 68, 0.3); }
+.btn-read:hover, .btn-read:focus-visible      { border-color: var(--accent-indigo); box-shadow: 0 0 20px rgba(99, 102, 241, 0.3); }
+.btn-describe:hover, .btn-describe:focus-visible  { border-color: var(--accent-violet); box-shadow: 0 0 20px rgba(139, 92, 246, 0.3); }
+.btn-question:hover, .btn-question:focus-visible  { border-color: #38bdf8; box-shadow: 0 0 20px rgba(56, 189, 248, 0.3); }
+
+.action-btn:hover {
+  background: var(--bg-card-hover);
+  transform: translateY(-2px);
+}
+
+.action-btn:hover .btn-icon {
+  transform: scale(1.14);
+}
+
+.action-btn:active {
+  transform: scale(0.95);
+  background: rgba(30, 41, 59, 0.95);
+}
+
+/* ==========================================================================
+   Footer & Edge Diagnostics
+   ========================================================================== */
+
+.footer {
+  margin-top: 0.5rem;
+  display: flex;
+  justify-content: center;
+}
+
+.system-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.45rem 0.95rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--glass-border);
+}
+
+.edge-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-emerald);
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.9);
 }
 
 .footer-status {
-  color: var(--muted);
-  font-size: 0.75rem;
-  text-align: center;
-  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+/* ==========================================================================
+   Responsive Adaptations
+   ========================================================================== */
+
+@media (max-width: 440px) {
+  .actions-grid {
+    grid-template-columns: 1fr;
+  }
+  .app-container {
+    padding: 0.5rem 0.75rem 1.4rem;
+  }
+  .mode-icon {
+    font-size: 2.5rem;
+  }
+  .mode-label {
+    font-size: 1.3rem;
+  }
+  .action-btn {
+    min-height: 68px;
+  }
 }

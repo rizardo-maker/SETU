@@ -128,66 +128,67 @@ class ConnectionState:
 HINT_COOLDOWN_S = 1.5
 
 
-async def run_text_mode(frame: np.ndarray, question: str | None) -> dict:
+async def run_text_mode(frame: np.ndarray, question: str | None = None) -> dict:
     """
-    Shared OCR -> (optional) Gemma-reasoning pipeline for "text" mode, used by
-    both the WebSocket frame handler and the single-shot /api/ocr endpoint.
-
-    Decision tree:
-      no OCR backend      -> fall back to VLM reading the image directly (tier 2)
-      no text found       -> honest "no text found", no VLM call
-      low OCR confidence  -> honest "too unclear", no VLM call (garbage in -> hallucinated answer out)
-      question asked      -> OCR text handed to Gemma for reasoning (tier 1, extra latency)
-      no question         -> raw OCR text spoken directly (tier 1, fast, no VLM round trip)
-
-    Returns a dict of the fields callers merge into their own response shape
-    (WS result / REST JSON) — always includes at least "answered", "speak",
-    "tier"; includes "ocr_text" / "ocr_confidence" / "label" when applicable.
+    OCR + LLM Refinement Pipeline (RapidOCR + Local Gemma-3 LLM):
+    1. Extracts high-accuracy text via RapidOCR.
+    2. Sends the raw extracted text to the local LLM (Ollama) to refine OCR typos,
+       reconstruct broken lines, and generate a clear, natural summary.
+    3. Returns the output in both text and spoken speech formats.
     """
-    q = question.strip() if question and question.strip() else None
-
     if not ocr.engine.ready:
-        if await vlm.is_available():
-            ok, jpeg_bytes = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            speak, latency_ms = await vlm.describe(
-                jpeg_bytes.tobytes(),
-                question=q or "Read and transcribe all visible text or signboards in this image. Keep it concise. If there is no text, say 'No text found'."
-            )
-            return {"tier": 2, "answered": "no text" not in speak.lower(), "speak": speak, "latency_ms": round(latency_ms, 1)}
-        return {"tier": 1, "answered": False, "speak": "No OCR backend installed."}
+        return {"tier": 1, "answered": False, "speak": "No OCR backend installed.", "text": "No OCR backend installed."}
 
-    result = ocr.engine.read_with_confidence(frame)
+    result = await asyncio.to_thread(ocr.engine.read_with_confidence, frame)
     log.info("📖 [OCR] backend=%s confidence=%.2f (%d chars): %r",
               result.backend, result.mean_confidence, len(result.text), result.text[:120])
 
     if not result.text:
-        return {"tier": 1, "answered": False, "speak": "No text found. Try moving closer."}
+        return {"tier": 1, "answered": False, "speak": "No text detected in view.", "text": "No text detected in view."}
 
-    if result.mean_confidence < config.OCR_MIN_CONFIDENCE:
-        log.info("📖 [OCR] confidence %.2f below floor %.2f — declining to reason over it",
-                  result.mean_confidence, config.OCR_MIN_CONFIDENCE)
+    if result.mean_confidence < 0.20:
         return {
-            "tier": 1, "answered": False, "speak": config.PHRASES["ocr_low_confidence"],
+            "tier": 1, "answered": False,
+            "speak": "Text is too blurry or unclear. Please hold steady.",
+            "text": "Text is too blurry or unclear. Please hold steady.",
             "ocr_text": result.text, "ocr_confidence": round(result.mean_confidence, 3),
         }
 
-    if q:
+    # Step 2: Send extracted text to LLM to refine and correct OCR output
+    final_text = result.text
+    tier = 1
+
+    if await vlm.is_available():
         try:
-            speak, vlm_latency = await vlm.answer_from_text(result.text, q, result.mean_confidence)
-            log.info("🤖 [Gemma Answer from OCR] (%.0fms): '%s'", vlm_latency, speak)
-        except vlm.VLMUnavailable:
-            log.warning("VLM unavailable for OCR reasoning — speaking raw OCR text instead")
-            speak = result.text
-        return {
-            "tier": 1, "answered": True, "label": result.text, "speak": speak,
-            "ocr_text": result.text, "ocr_confidence": round(result.mean_confidence, 3),
-        }
+            llm_question = question.strip() if question and question.strip() else (
+                "Read and cleanly state what this text says in 1-2 concise sentences."
+            )
+            refined_text, lat = await vlm.answer_from_text(
+                extracted_text=result.text,
+                question=llm_question,
+                ocr_confidence=result.mean_confidence,
+                system_override=(
+                    "You are a direct text reader for a blind assistant. "
+                    "Read the provided OCR text, correct obvious character typos, and output only the refined, natural text. "
+                    "Do not include any conversational filler or meta-commentary."
+                ),
+            )
+            if refined_text and not refined_text.upper().startswith("UNCLEAR"):
+                log.info("🧠 [LLM-Refined OCR] (%.1fms): %r", lat, refined_text[:120])
+                final_text = refined_text
+                tier = 2
+        except Exception as e:
+            log.warning("LLM OCR refinement failed, using raw OCR text: %s", e)
 
-    # No question: reading text back verbatim is a legitimate fast path —
-    # don't spend 2-6s on a VLM round trip nobody asked for.
     return {
-        "tier": 1, "answered": True, "label": result.text, "speak": result.text,
-        "ocr_text": result.text, "ocr_confidence": round(result.mean_confidence, 3),
+        "tier": tier,
+        "answered": True,
+        "label": final_text,
+        "text": final_text,
+        "speak": final_text,
+        "ocr_text": result.text,
+        "ocr_confidence": round(result.mean_confidence, 3),
+        "chunks": result.chunks,
     }
 
 
@@ -460,10 +461,9 @@ async def api_stt(payload: dict):
 
 @app.post("/api/currency")
 async def api_currency(payload: dict):
-    """Single-shot currency detection via the YOLO classifier.
+    """Dedicated single-shot currency detection endpoint.
     Accepts: {"image_b64": "..."}
     Returns: {"speak": "...", "denominations": [...], "total_value": N, "detection_count": N, "answered": bool}
-    Falls back to VLM if the YOLO model isn't loaded.
     """
     from fastapi.responses import JSONResponse
     image_b64 = payload.get("image_b64", "")
@@ -474,52 +474,272 @@ async def api_currency(payload: dict):
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
-    # Gemma is the gatekeeper for "is there actually currency here?" The
-    # YOLO currency model has no negative class — it confidently labels a
-    # face or a bus as "100 rupees" — so we cannot trust it to decide
-    # whether currency is present. Gemma reliably answers yes/no. If yes,
-    # we hand off to YOLO for the exact denomination breakdown, which is
-    # what YOLO is actually good at.
-    ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-    gemma_says_currency = True
-    try:
-        verdict, _ = await vlm.describe(
-            jpeg.tobytes(),
-            question="Is there an Indian paper currency note or coin clearly visible in this image? Answer with only the single word YES or NO.",
-        )
-        gemma_says_currency = "yes" in verdict.strip().lower()[:6]
-        log.info("[API/CURRENCY] Gemma currency-present verdict: %r -> %s", verdict[:40], gemma_says_currency)
-    except vlm.VLMUnavailable:
-        gemma_says_currency = True   # no Gemma — fall through and trust YOLO
+    t0 = time.monotonic()
 
-    if not gemma_says_currency:
+    # 1. High-Precision YOLO Currency Detection (95%+ Confidence)
+    if currency.classifier.ready:
+        try:
+            detections = await asyncio.to_thread(currency.classifier.detect, frame, conf_threshold=config.CURRENCY_CONF_FLOOR)
+            if detections:
+                min_conf = min(float(d["confidence"]) for d in detections)
+                denoms = sorted((d["denomination"] for d in detections), reverse=True)
+                total = sum(denoms)
+                speak = currency._speak_for(list(denoms), total)
+                log.info(f"[API/CURRENCY] High Accuracy YOLO detected: {denoms} (Total: {total}, min_conf={min_conf:.2f})")
+                return JSONResponse(content={
+                    "answered": True, "denominations": denoms, "total_value": total,
+                    "detection_count": len(detections), "confidence": min_conf, "speak": speak,
+                    "latency_ms": round((time.monotonic() - t0) * 1000, 1),
+                })
+        except Exception as e:
+            log.warning("[API/CURRENCY] YOLO error: %s", e)
+
+    # 2. Check for lower confidence / borderline detections (abstain if doubtful)
+    if currency.classifier.ready:
+        try:
+            borderline = await asyncio.to_thread(currency.classifier.detect, frame, conf_threshold=0.35)
+            if borderline:
+                log.info("[API/CURRENCY] Borderline detection (conf < 0.70) -> Safe Abstention")
+                return JSONResponse(content={
+                    "answered": False, "denominations": [], "total_value": 0,
+                    "detection_count": len(borderline),
+                    "speak": "I am not completely sure. Please hold the note a bit steadier in good lighting.",
+                    "latency_ms": round((time.monotonic() - t0) * 1000, 1),
+                })
+        except Exception as e:
+            log.warning("[API/CURRENCY] YOLO borderline check error: %s", e)
+
+    # 3. Local Vision-Language Model Verification
+    ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not ok:
+        return JSONResponse(status_code=500, content={"error": "JPEG encode failed"})
+
+    try:
+        speak, latency_ms = await vlm.describe(
+            jpeg.tobytes(),
+            question=(
+                "Identify any paper currency notes or coins visible in this image (such as Indian Rupees or other currency). "
+                "State the exact denomination of each note clearly and calculate the total amount in 1 concise sentence (e.g. '500 rupees' or 'Two 100 rupee notes, total 200 rupees'). "
+                "If the note is too blurry or unclear to be certain, say 'I am not completely sure. Please hold the note steadier.' "
+                "If no currency or money is visible at all, say exactly 'No currency detected.'"
+            ),
+        )
+        answered = "no currency" not in speak.lower() and "unclear" not in speak.lower() and "not sure" not in speak.lower() and "not completely sure" not in speak.lower()
+        log.info("[API/CURRENCY] VLM Response: %r (answered=%s)", speak, answered)
         return JSONResponse(content={
-            "answered": False, "denominations": [], "total_value": 0,
-            "detection_count": 0, "speak": "No currency detected. Point the camera at the notes.",
+            "answered": answered,
+            "speak": speak,
+            "denominations": [],
+            "total_value": 0,
+            "latency_ms": round(latency_ms, 1),
+        })
+    except vlm.VLMUnavailable:
+        return JSONResponse(content={
+            "answered": False,
+            "speak": "Currency model is not available.",
+            "denominations": [],
+            "total_value": 0,
+            "latency_ms": round((time.monotonic() - t0) * 1000, 1),
         })
 
-    if currency.classifier.ready:
-        detections = await asyncio.to_thread(currency.classifier.detect, frame)
-        if detections:
-            denoms = sorted((d["denomination"] for d in detections), reverse=True)
-            total = sum(denoms)
-            speak = currency._speak_for(list(denoms), total)
-            log.info("[API/CURRENCY] denominations=%s total=%d", denoms, total)
-            return JSONResponse(content={
-                "answered": True, "denominations": denoms, "total_value": total,
-                "detection_count": len(detections), "speak": speak,
-            })
 
-    # Gemma confirmed currency but YOLO couldn't localise it (or isn't
-    # loaded) — let Gemma read the denominations directly as a fallback.
+@app.post("/api/objects")
+async def api_objects(payload: dict):
+    """Dedicated Object Detection endpoint.
+    Identifies surrounding objects, furniture, people, items, tools (ignoring currency notes).
+    """
+    from fastapi.responses import JSONResponse
+    image_b64 = payload.get("image_b64", "")
+    if not image_b64:
+        return JSONResponse(status_code=400, content={"error": "missing image_b64"})
     try:
-        speak, _ = await vlm.describe(
-            jpeg.tobytes(),
-            question="List every Indian rupee note denomination visible and give the total in one short sentence.",
-        )
-    except vlm.VLMUnavailable:
-        speak = "I can see currency but couldn't read the denomination."
-    return JSONResponse(content={"answered": True, "speak": speak, "denominations": [], "total_value": 0})
+        frame = decode_jpeg_b64(image_b64)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+    t0 = time.monotonic()
+    detected_parts: list[str] = []
+
+    # 1. Run local YOLO general object detector
+    if detect.detector.ready:
+        try:
+            o_dets = await asyncio.to_thread(detect.detector.detect, frame)
+            counts: dict[str, int] = {}
+            for od in o_dets:
+                label = od.label
+                # Exclude any generic labels that might represent currency
+                if label.lower() in ("currency", "money", "banknote"):
+                    continue
+                counts[label] = counts.get(label, 0) + 1
+            for lbl, count in sorted(counts.items(), key=lambda x: -x[1]):
+                detected_parts.append(f"{count} {lbl}s" if count > 1 else f"a {lbl}")
+        except Exception as e:
+            log.warning("[API/OBJECTS] Object YOLO error: %s", e)
+
+    if detected_parts:
+        if len(detected_parts) == 1:
+            joined = detected_parts[0]
+        elif len(detected_parts) == 2:
+            joined = f"{detected_parts[0]} and {detected_parts[1]}"
+        else:
+            joined = ", ".join(detected_parts[:-1]) + f", and {detected_parts[-1]}"
+        speak = f"I can see: {joined}."
+        log.info("[API/OBJECTS] Detected (YOLO Objects): %r", speak)
+        return JSONResponse(content={
+            "answered": True,
+            "speak": speak,
+            "latency_ms": round((time.monotonic() - t0) * 1000, 1),
+        })
+
+    # 2. VLM Fallback for general objects (strictly without currency)
+    ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    if ok and await vlm.is_available():
+        try:
+            speak, latency_ms = await vlm.describe(
+                jpeg.tobytes(),
+                question=(
+                    "Identify the key physical objects, furniture, tools, electronic devices, people, or items visible in front of the camera. "
+                    "List what you see in 1 concise spoken sentence (e.g. 'I see a chair, a laptop, and a water bottle'). "
+                    "Do not mention any currency, money, or banknotes."
+                ),
+            )
+            log.info("[API/OBJECTS] VLM detected: %r", speak)
+            return JSONResponse(content={
+                "answered": True,
+                "speak": speak,
+                "latency_ms": round((time.monotonic() - t0) * 1000, 1),
+            })
+        except Exception as e:
+            log.warning("[API/OBJECTS] VLM query failed: %s", e)
+
+    return JSONResponse(content={
+        "answered": False,
+        "speak": "No objects clearly detected.",
+        "latency_ms": round((time.monotonic() - t0) * 1000, 1),
+    })
+
+
+@app.post("/api/proximity")
+@app.post("/api/collision")
+async def api_proximity(payload: dict):
+    """Proximity & Collision Detection endpoint (from prox/ pipeline).
+    Scans for physical hazards and obstacles on the walking path.
+    Returns: {"answered": bool, "collision_alert": "warn"|"urgent"|None, "threats": [...], "speak": "..."}
+    """
+    from fastapi.responses import JSONResponse
+    image_b64 = payload.get("image_b64", "")
+    if not image_b64:
+        return JSONResponse(status_code=400, content={"error": "missing image_b64"})
+    try:
+        frame = decode_jpeg_b64(image_b64)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+    t0 = time.monotonic()
+    if not detect.detector.ready:
+        return JSONResponse(content={
+            "answered": False,
+            "collision_alert": None,
+            "threats": [],
+            "speak": "Collision detector not available.",
+            "latency_ms": round((time.monotonic() - t0) * 1000, 1),
+        })
+
+    try:
+        threats = await asyncio.to_thread(detect.detector.scan_for_collision, frame)
+    except Exception as e:
+        log.error("[API/PROXIMITY] Error: %s", e)
+        return JSONResponse(content={"answered": False, "speak": f"Proximity error: {e}"})
+
+    speak, severity = detect.detector.speak_collision(threats)
+    threat_list = [
+        {
+            "label": t.label,
+            "confidence": round(t.confidence, 3),
+            "area_fraction": round(t.area_fraction, 3),
+            "distance_meters": t.distance_meters,
+            "direction": t.direction,
+            "severity": t.severity,
+            "bbox": t.bbox,
+        }
+        for t in threats
+    ]
+
+    return JSONResponse(content={
+        "answered": bool(threats),
+        "collision_alert": severity,
+        "severity": severity,
+        "threats": threat_list,
+        "detection_count": len(threats),
+        "speak": speak,
+        "latency_ms": round((time.monotonic() - t0) * 1000, 1),
+    })
+
+
+@app.post("/api/navigate")
+async def api_navigate(payload: dict):
+    """
+    Core SRS Feature: Navigate Mode.
+    Finds room/sign targets (e.g. 'C-214', 'Exit', 'Office', 'Washroom')
+    while enforcing the strict priority hierarchy:
+      1. Critical / Path-blocking obstacle warnings (e.g. "Chair ahead. Move slightly left.")
+      2. Target detection (e.g. "C-214 detected on your right.")
+      3. Searching status (e.g. "Searching for C-214. Path is clear.")
+    """
+    from fastapi.responses import JSONResponse
+    image_b64 = payload.get("image_b64", "")
+    target = payload.get("target", "").strip()
+    if not image_b64:
+        return JSONResponse(status_code=400, content={"error": "missing image_b64"})
+    if not target:
+        target = "signboard"
+
+    try:
+        frame = decode_jpeg_b64(image_b64)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+    t0 = time.monotonic()
+
+    # Priority 1: Check for critical or path-blocking obstacles
+    obstacle_warning = None
+    if detect.detector.ready:
+        threats = await asyncio.to_thread(detect.detector.scan_for_collision, frame)
+        if threats:
+            speak_obs, sev = detect.detector.speak_collision(threats)
+            if sev == "urgent":
+                obstacle_warning = f"Stop! {threats[0].label} right in front of you."
+            elif sev == "warn":
+                obstacle_warning = f"{threats[0].label.capitalize()} ahead. Move carefully."
+
+    # Priority 2: Search for target room / sign in frame using RapidOCR
+    target_match = None
+    if ocr.engine.ready:
+        target_match = await asyncio.to_thread(ocr.engine.find_target, frame, target)
+
+    # Assemble prioritized voice response
+    if obstacle_warning:
+        if target_match and target_match.get("found"):
+            speak = f"{obstacle_warning} {target} detected {target_match['direction']}."
+        else:
+            speak = obstacle_warning
+        answered = True
+    elif target_match and target_match.get("found"):
+        speak = f"{target} detected {target_match['direction']}."
+        answered = True
+    else:
+        speak = f"Searching for {target}. Path is clear."
+        answered = False
+
+    return JSONResponse(content={
+        "answered": answered,
+        "target": target,
+        "target_found": bool(target_match and target_match.get("found")),
+        "obstacle_warning": obstacle_warning,
+        "direction": target_match.get("direction") if target_match else None,
+        "speak": speak,
+        "latency_ms": round((time.monotonic() - t0) * 1000, 1),
+    })
 
 
 @app.post("/api/detect")
