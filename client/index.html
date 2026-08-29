@@ -8,11 +8,11 @@
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-  <!-- Voice-first UI: no mode buttons. Default state is continuous
-       collision detection; the wake phrase "hey setu <command>"
-       invokes single-shot modes (currency / describe / read / question)
-       and returns to collision. Screen shows what's happening for
-       sighted judges + emergencies. -->
+  <!-- Voice-first UI: no mode buttons. Default/idle state is "nothing
+       running" — every mode, including proximity detection, is a
+       one-shot scan invoked by a bare command word ("currency",
+       "describe", "read", "question", "detect") and returns to idle
+       when done. Screen shows what's happening for sighted judges. -->
 
   <header class="topbar">
     <h1>SETU</h1>
@@ -22,25 +22,33 @@
   <main>
     <video id="camera" playsinline autoplay muted></video>
 
-    <!-- Central status pane — swaps between "collision status" and
-         "current mode running" states, always human-readable. -->
+    <!-- Central status pane — swaps between "idle" and "current mode
+         running" states, always human-readable. -->
     <div id="mode-card" class="mode-card" role="status" aria-live="polite">
-      <div id="mode-icon" class="mode-icon">🛡️</div>
-      <div id="mode-label" class="mode-label">Collision watch</div>
-      <div id="mode-detail" class="mode-detail">Path is clear.</div>
+      <div id="mode-icon" class="mode-icon">🎙️</div>
+      <div id="mode-label" class="mode-label">Ready</div>
+      <div id="mode-detail" class="mode-detail">Say a command, or tap one below.</div>
     </div>
 
-    <!-- Wake helper line — reminds the user what to say, always visible. -->
+    <!-- Command hint line — reminds the user what to say. Each command
+         word is also a real, tappable button wired to the exact same
+         dispatch path voice uses (see app.js _bindCommandButtons), so a
+         sighted user or someone in a loud room can invoke a mode with a
+         tap instead of speaking. -->
     <p id="wake-hint" class="wake-hint">
-      Say <b>“currency”</b>, <b>“describe”</b>, <b>“read”</b>, or <b>“question”</b>.
-      Say <b>“stop”</b> (or tap the card) to mute alerts.
+      Say or tap
+      <button type="button" class="cmd-word" data-cmd="currency">“currency”</button>,
+      <button type="button" class="cmd-word" data-cmd="describe">“describe”</button>,
+      <button type="button" class="cmd-word" data-cmd="read">“read”</button>,
+      <button type="button" class="cmd-word" data-cmd="question">“question”</button>, or
+      <button type="button" class="cmd-word" data-cmd="detect">“detect”</button>.
     </p>
 
     <!-- Live transcription of the latest utterance heard from the browser's
          speech recogniser. Purely diagnostic for sighted use. -->
     <p id="transcript" role="status" aria-live="assertive"></p>
 
-    <!-- Small footer: last collision alert time & tier2 (Gemma) status. -->
+    <!-- Small footer: tier2 (Gemma) reachability status. -->
     <p id="footer-status" class="footer-status">Waiting for camera.</p>
   </main>
 

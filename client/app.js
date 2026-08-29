@@ -1,35 +1,45 @@
 /* ---------------------------------------------------------------------
  * SETU voice-first client
  *
- * Default state: continuous COLLISION detection streaming to the server
- * over the WebSocket. Only speaks when there's an actual hazard.
+ * Default/idle state: nothing is running. The app waits for a voice
+ * command or a tapped command word. Every mode — including proximity
+ * detection — is a ONE-SHOT scan: capture a frame, ask the server,
+ * speak the result, return to idle. Nothing streams continuously.
  *
- * Voice commands: browser's Web Speech API listens continuously for
- * "hey setu <command>". On match, invokes the corresponding one-shot
- * mode (currency / describe / read / question), speaks the answer,
- * and returns to collision watch automatically.
+ * (Earlier version ran proximity/collision detection continuously in
+ * the background at ~3fps as the app's default state. That's been
+ * deliberately removed — it now behaves exactly like currency /
+ * describe / read: invoked on demand via "detect", scans, speaks once,
+ * done. The trade-off: a hazard that appears BETWEEN scans, or while
+ * another mode is running, is no longer caught automatically — there's
+ * no background watcher left to catch it. If you want that safety net
+ * back, the old continuous-stream approach is worth revisiting instead
+ * of purely on-demand scanning.)
  *
- * "hey setu question" is the only command that then records the user's
- * spoken question via MediaRecorder, ships the audio to /api/stt for
- * offline whisper transcription, and hands the transcript to Gemma
- * along with the current camera frame.
+ * Voice commands: browser's Web Speech API listens continuously for a
+ * bare command word ("currency", "describe", "read", "question",
+ * "detect"). On match, invokes the corresponding one-shot mode, speaks
+ * the answer, and returns to idle automatically.
  *
- * The Web Speech API IS used here for the wake-phrase match — but only
+ * "question" is the only command that then records the user's spoken
+ * question via MediaRecorder, ships the audio to /api/stt for offline
+ * whisper transcription, and hands the transcript to Gemma along with
+ * the current camera frame.
+ *
+ * The Web Speech API IS used here for command-word matching — but only
  * for that. It never handles the user's actual question content, which
  * always goes through the local whisper server. That preserves the
  * "user data never leaves the machine" story for the load-bearing part.
  * ------------------------------------------------------------------- */
 
-const FRAME_MAX_DIM = 640;          // collision streaming — small & fast
+const FRAME_MAX_DIM = 640;          // proximity scan — doesn't need fine detail, keep it fast
 const JPEG_QUALITY = 0.7;
-const HIRES_MAX_DIM = 1600;         // read / currency / describe — text needs detail
+const HIRES_MAX_DIM = 1600;         // read / currency / describe — text/detail needs resolution
 const HIRES_QUALITY = 0.9;
-const COLLISION_FPS = 3;                                // frames per second we stream during collision watch
-const COLLISION_INTERVAL_MS = 1000 / COLLISION_FPS;
-const QUESTION_RECORD_MS = 5000;                        // how long we listen after "hey setu question"
+const QUESTION_RECORD_MS = 5000;    // how long we listen after "question"
 
-// Distinct haptic pulses for the two collision severities.
-const COLLISION_HAPTICS = {
+// Distinct haptic pulses for the two proximity-alert severities.
+const PROXIMITY_HAPTICS = {
   warn: [120, 60, 120],
   urgent: [400, 120, 400, 120, 400],
 };
@@ -46,23 +56,20 @@ const DENOMINATION_HAPTICS = {
 };
 
 // Wake phrases: just the command word, spoken alone or as the last
-// word of the sentence. No "hey setu" prefix — turns out that got
-// misheard consistently in noisy rooms. Now:
-//   "currency" / "money" / "cash"          -> currency mode
-//   "describe" / "scene" / "look"          -> scene description
-//   "read" / "read text" / "text"          -> OCR + summarize
-//   "question" / "ask" / "ask a question"  -> record & ask
-// Plus snooze/resume controls for collision alerts:
-//   "stop" / "ok stop" / "quiet" / "mute"  -> stop collision voice
-//   "resume" / "start again" / "unmute"    -> resume collision voice
+// word of the sentence. No "hey setu" prefix — that got misheard
+// consistently in noisy rooms.
+//   "currency" / "money" / "cash"           -> currency mode
+//   "describe" / "scene" / "look"           -> scene description
+//   "read" / "read text" / "text"           -> OCR + summarize
+//   "question" / "ask" / "ask a question"   -> record & ask
+//   "detect" / "proximity" / "scan"         -> one-shot proximity/collision scan
 const COMMAND_ALIASES = {
   currency:  ["currency", "money", "cash", "notes"],
   describe:  ["describe", "scene", "what do you see", "look"],
   read:      ["read text", "read this", "read", "text", "ocr"],
   question:  ["ask a question", "question", "ask"],
+  detect:    ["detect", "proximity", "scan", "check surroundings"],
 };
-const SNOOZE_PHRASES = ["stop", "ok stop", "okay stop", "quiet", "mute", "shut up"];
-const RESUME_PHRASES = ["resume", "start again", "unmute", "wake up", "listen"];
 
 
 class SetuApp {
@@ -79,23 +86,14 @@ class SetuApp {
     this.footerEl   = document.getElementById("footer-status");
     this.listenBadge = document.getElementById("listen-badge");
 
-    this.ws = null;
-    this.wsReady = false;
-    this.reconnectDelay = 1000;
-
     this.stream = null;
     this.track = null;
 
     // The state machine has exactly one active state at a time.
-    //   "collision"      — continuous stream of frames, only speak on hazard
-    //   "recording"      — capturing the user's spoken question via MediaRecorder
-    //   "processing"     — a one-shot mode is in flight (currency / scene / text / question)
-    // Collision streaming is paused during recording/processing so the WebSocket
-    // isn't racing with the one-shot request. Urgent collision alerts, when we
-    // add mid-mode collision peek, still interrupt.
-    this.state = "collision";
-    this.collisionTimer = null;
-    this.seq = 0;
+    //   "idle"        — nothing running; waiting for a command
+    //   "processing"  — a one-shot mode is in flight (currency / describe /
+    //                   read / question / detect)
+    this.state = "idle";
 
     this.currentAudio = null;
     this.speechRecognizer = null;
@@ -103,11 +101,49 @@ class SetuApp {
     this.mediaRecorder = null;
 
     this.tier2Available = false;
-    this.collisionMuted = false;
-    this.lastCollisionState = null;
     this._lastActionAt = 0;
     this._recognizerPaused = false;
     this._wakeWantsToRun = false;
+    this._recognizerGen = 0;   // invalidates stale onend/spawn callbacks — see _spawnRecognizer
+
+    // ---- Mode-run epoch: the actual fix for "command matched but did
+    // nothing" ----
+    //
+    // This app has THREE independent async event sources touching shared
+    // state: the SpeechRecognition callback (voice commands, firing on
+    // its own timeline), fetch() promise resolution (network-timed), and
+    // HTMLAudioElement events (audio-hardware-timed). None of them run
+    // on a shared clock. A plain `this.state = "..."` string checked "by
+    // convention" at the top of a function is NOT a lock — it only
+    // protects the instant it's read, and every `await` in an async
+    // mode function is a point where the world can change underneath it
+    // (the user re-triggers a command) before the function resumes and
+    // blindly keeps going as if nothing happened. That's what "matched,
+    // but returned with no network call" looks like: a mode function
+    // silently continuing past a stale check into a no-op path, or two
+    // overlapping mode runs both writing `this.state` and clobbering
+    // each other.
+    //
+    // Fix: `_modeEpoch` increments exactly once per attempted mode
+    // dispatch, synchronously, in the same tick as the command match —
+    // no async gap for a second command to sneak through. Every mode
+    // function captures its own epoch value at entry and MUST re-check
+    // `epoch === this._modeEpoch` after every single `await` before
+    // touching shared state (this.state, this.currentAudio, the mode
+    // card) or speaking. A mismatch means we've been superseded — abort
+    // silently, do not touch anything, do not speak. This is the
+    // standard "cancellation token" shape (conceptually identical to an
+    // AbortController, but signalled by value-equality instead of an
+    // event, since there's no long-running I/O to actually abort here —
+    // fetch() will still complete, we just discard its result).
+    this._modeEpoch = 0;
+    this._modeInFlight = false;   // true from the instant a command is accepted until it fully resolves
+  }
+
+  // True if `epoch` is still the live one. Call after every `await`
+  // inside a mode function before doing anything user-visible.
+  _epochLive(epoch) {
+    return epoch === this._modeEpoch;
   }
 
   async start() {
@@ -127,36 +163,70 @@ class SetuApp {
       this._speak("Camera is not available. " + this._explainCameraError(err));
       return;
     }
-    this._connectWebSocket();
+    this._enterIdleMode();
     this._startWakeListener();
-    this._bindMuteTap();
+    this._bindCommandButtons();
+    this._bindVisibilityLogging();
+
+    // Ping the server once at startup purely to learn whether Gemma
+    // (tier2) is reachable, so the footer can say so honestly. No
+    // persistent connection is kept — every mode already talks to the
+    // server over plain one-shot fetch() calls.
+    this._checkTier2Status();
   }
 
-  // Tap anywhere on the mode card to snooze / resume collision voice
-  // alerts. Also serves as the first user gesture that satisfies
-  // Chrome's autoplay + vibration policies (both need a real tap
-  // before they'll fire).
-  _bindMuteTap() {
-    if (!this.modeCard) return;
-    const toggle = () => this._toggleCollisionMute();
-    this.modeCard.addEventListener("click", toggle);
-    this.modeCard.setAttribute("role", "button");
-    this.modeCard.setAttribute("tabindex", "0");
-    this.modeCard.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+  async _checkTier2Status() {
+    try {
+      const res = await fetch("/api/vlm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),   // deliberately missing image_b64 -> cheap 400, just probing reachability
+      });
+      this.tier2Available = res.status !== 503;
+    } catch (_) {
+      this.tier2Available = false;
+    }
+    this._footer(this.tier2Available ? "Voice + Gemma3 ready." : "Gemma3 unavailable — describe/question limited.");
+  }
+
+  // A backgrounded tab (screen lock, app-switch, another window
+  // focused) can leave the <video> element in a transient state where
+  // `_captureFrame()` returns null — every mode function already logs
+  // that with the video's actual readyState/dimensions when it happens
+  // (see the `console.warn` calls in _run*Mode), but log the visibility
+  // transition itself too so "camera not ready" in the console can be
+  // correlated with "tab was hidden a moment earlier" instead of
+  // looking like an unexplained one-off.
+  _bindVisibilityLogging() {
+    document.addEventListener("visibilitychange", () => {
+      console.log(`👁️  tab visibility: ${document.visibilityState} | video.readyState=${this.video.readyState}`);
     });
   }
 
-  _toggleCollisionMute() {
-    this.collisionMuted = !this.collisionMuted;
-    if (this.collisionMuted) {
-      this._interruptSpeech();
-      this._speak("Muted.");
-      this._footer("Collision voice muted. Tap or say 'resume' to unmute.");
-    } else {
-      this._speak("Listening for hazards.");
-      this._footer("Voice + Gemma3 ready.");
-    }
+  // Wire the tappable "currency"/"describe"/"read"/"question"/"detect" words in
+  // the hint line to the exact same dispatch path voice uses
+  // (_tryInvokeCommand), so a tap and a spoken command are genuinely
+  // two front doors into one system, not two separate paths that can
+  // drift out of sync.
+  _bindCommandButtons() {
+    const buttons = document.querySelectorAll(".cmd-word[data-cmd]");
+    buttons.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const cmd = btn.dataset.cmd;
+        console.log(`👆 command word tapped: ${cmd}`);
+        const accepted = this._tryInvokeCommand(cmd, "tap");
+        if (!accepted) {
+          // Give tactile feedback that the tap registered but was
+          // declined, rather than silently doing nothing.
+          this._flashButtonDeclined(btn);
+        }
+      });
+    });
+  }
+
+  _flashButtonDeclined(btn) {
+    btn.disabled = true;
+    setTimeout(() => { btn.disabled = false; }, 600);
   }
 
   _explainCameraError(err) {
@@ -169,110 +239,11 @@ class SetuApp {
     return "Check camera permissions and try again.";
   }
 
-  // -------- WebSocket lifecycle --------
+  // -------- Idle mode (default state — nothing running) --------
 
-  _connectWebSocket() {
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    const url = `${proto}://${location.host}/ws/stream`;
-    console.log("🔌 WS connecting", url);
-    this.ws = new WebSocket(url);
-    this.ws.onopen = () => {
-      this.wsReady = true;
-      this.reconnectDelay = 1000;
-      this._enterCollisionMode();
-    };
-    this.ws.onclose = () => {
-      this.wsReady = false;
-      this._stopCollisionStream();
-      this._footer("Disconnected — reconnecting…");
-      setTimeout(() => this._connectWebSocket(), this.reconnectDelay);
-      this.reconnectDelay = Math.min(this.reconnectDelay * 1.6, 10000);
-    };
-    this.ws.onerror = (e) => console.error("WS error", e);
-    this.ws.onmessage = (ev) => this._onServerMessage(JSON.parse(ev.data));
-  }
-
-  // -------- Collision mode (default state) --------
-
-  _enterCollisionMode() {
-    this.state = "collision";
-    this._setModeCard("clear", "🛡️", "Collision watch", "Path is clear.");
-    this._startCollisionStream();
-  }
-
-  _startCollisionStream() {
-    if (this.collisionTimer) return;
-    this.collisionTimer = setInterval(() => this._sendCollisionFrame(), COLLISION_INTERVAL_MS);
-  }
-
-  _stopCollisionStream() {
-    if (this.collisionTimer) {
-      clearInterval(this.collisionTimer);
-      this.collisionTimer = null;
-    }
-  }
-
-  _sendCollisionFrame() {
-    if (!this.wsReady) return;
-    if (this.state !== "collision") return;   // paused during a one-shot mode
-    const b64 = this._captureFrame();
-    if (!b64) return;
-    this.seq += 1;
-    this.ws.send(JSON.stringify({
-      type: "frame", mode: "collision",
-      image_b64: b64, seq: this.seq,
-    }));
-  }
-
-  // -------- WebSocket incoming (guidance + result for collision mode) --------
-
-  _onServerMessage(msg) {
-    if (msg.type === "status") {
-      this.tier2Available = !!msg.tier2_available;
-      this._footer(this.tier2Available ? "Voice + Gemma3 ready." : "Gemma3 unavailable — describe/question limited.");
-      return;
-    }
-    if (msg.type === "guidance") return;  // ignored in collision mode (no sonar UI)
-    if (msg.type === "result" && msg.mode === "collision") {
-      this._handleCollisionResult(msg);
-      return;
-    }
-  }
-
-  _handleCollisionResult(msg) {
-    const urgent = msg.collision_alert === "urgent";
-    const warn = msg.collision_alert === "warn";
-
-    // Urgent hazards ALWAYS interrupt — even mid-mode, even if muted.
-    // Mute silences everyday alerts, not an actual "you're about to
-    // walk into a car" moment.
-    if (urgent) {
-      this._setModeCard("urgent", "🛑", "STOP", msg.speak || "Hazard right in front of you.");
-      if (msg.speak) this._speak(msg.speak, { interrupt: true });
-      this._safeVibrate(COLLISION_HAPTICS.urgent);
-      return;
-    }
-
-    // Non-urgent updates only touch the UI while collision watch is the
-    // active state; otherwise the "Careful" chip would overwrite the
-    // mode card mid-answer.
-    if (this.state !== "collision") return;
-
-    if (warn) {
-      // De-dupe: only speak the "careful" once per hazard, not on every
-      // frame while the object is still in view.
-      const changed = this.lastCollisionState !== "warn";
-      this.lastCollisionState = "warn";
-      this._setModeCard("warn", "⚠️", "Careful", msg.speak || "Object close ahead.");
-      if (changed && !this.collisionMuted && msg.speak) {
-        this._speak(msg.speak, { interrupt: false });
-        this._safeVibrate(COLLISION_HAPTICS.warn);
-      }
-    } else {
-      this.lastCollisionState = "clear";
-      const label = this.collisionMuted ? "Watching (muted)" : "Collision watch";
-      this._setModeCard("clear", "🛡️", label, "Path is clear.");
-    }
+  _enterIdleMode() {
+    this.state = "idle";
+    this._setModeCard("idle", "🎙️", "Ready", "Say a command, or tap one below.");
   }
 
   _safeVibrate(pattern) {
@@ -297,33 +268,51 @@ class SetuApp {
     this._spawnRecognizer();
   }
 
-  // Create a FRESH recognizer each time. Reusing one instance across
-  // Chrome's ~60s auto-kill is unreliable — a reused object often throws
-  // "already started" or silently never restarts, which is exactly the
-  // "commands stop working after the first" symptom. A new object each
-  // cycle sidesteps all of that.
+  // Create a FRESH recognizer each cycle (Chrome kills continuous
+  // recognition every ~60s, and reusing one instance across that is
+  // unreliable — it often throws "already started" or silently never
+  // restarts). Every recognizer instance is tagged with the generation
+  // counter active when it was spawned; its own onend/onerror callbacks
+  // only schedule a respawn if that generation is STILL the current one.
+  // This is what actually prevents the double-recognizer race: pause →
+  // abort() (queues an onend for gen N) → resume (bumps to gen N+1 and
+  // spawns) → the late gen-N onend fires and is a no-op because
+  // this._recognizerGen is now N+1. Without this tag, both the aborted
+  // recognizer's respawn AND the explicit resume's respawn would create
+  // two live SpeechRecognition instances fighting over the mic, and one
+  // would silently fail to start — leaving `speechRecognizer` pointing
+  // at a dead object while commands stopped working with no error shown.
   _spawnRecognizer() {
-    if (!this._wakeWantsToRun) return;
-    if (this._recognizerPaused) return;   // suspended during question recording
+    if (!this._wakeWantsToRun || this._recognizerPaused) return;
 
+    const gen = ++this._recognizerGen;
     const r = new this._SR();
     r.continuous = true;
     r.interimResults = true;
     r.lang = "en-US";
 
-    r.onstart = () => { this._badge("Listening", true); console.log("🎧 recognizer started"); };
-    r.onresult = (ev) => this._onSpeechResult(ev);
+    r.onstart = () => {
+      if (gen !== this._recognizerGen) return;
+      this._badge("Listening", true);
+      console.log(`🎧 recognizer #${gen} started`);
+    };
+    r.onresult = (ev) => {
+      if (gen !== this._recognizerGen) return;   // stale instance, ignore
+      this._onSpeechResult(ev);
+    };
     r.onerror = (e) => {
-      console.warn("🎧 SR error:", e.error);
+      if (gen !== this._recognizerGen) return;
+      console.warn(`🎧 recognizer #${gen} error:`, e.error);
       if (e.error === "not-allowed") {
         this._wakeWantsToRun = false;
         this._badge("Mic blocked", false);
         this._footer("Microphone permission was denied. Allow it and reload.");
       }
-      // 'no-speech' / 'aborted' / 'network' → just let onend respawn.
+      // 'no-speech' / 'aborted' / 'network' → let onend respawn.
     };
     r.onend = () => {
-      console.log("🎧 recognizer ended, respawning");
+      console.log(`🎧 recognizer #${gen} ended`);
+      if (gen !== this._recognizerGen) return;   // superseded — do NOT respawn
       this._badge("…", false);
       clearTimeout(this.recognizerRestartTimer);
       this.recognizerRestartTimer = setTimeout(() => this._spawnRecognizer(), 300);
@@ -333,17 +322,21 @@ class SetuApp {
     try {
       r.start();
     } catch (e) {
-      console.warn("🎧 SR start failed, retrying:", e);
+      if (gen !== this._recognizerGen) return;
+      console.warn(`🎧 recognizer #${gen} start failed, retrying:`, e);
       clearTimeout(this.recognizerRestartTimer);
       this.recognizerRestartTimer = setTimeout(() => this._spawnRecognizer(), 500);
     }
   }
 
   _pauseRecognizer() {
-    // Stop the wake recognizer while question mode owns the mic, so the
-    // two aren't fighting over the microphone (which kills the recognizer
-    // on macOS Chrome and it never comes back).
+    // Bump the generation FIRST so the outgoing recognizer's onend (which
+    // fires asynchronously after abort()) can never schedule a respawn —
+    // it checks its captured `gen` against this._recognizerGen and finds
+    // a mismatch.
     this._recognizerPaused = true;
+    this._recognizerGen++;
+    clearTimeout(this.recognizerRestartTimer);
     if (this.speechRecognizer) {
       try { this.speechRecognizer.abort(); } catch (_) {}
     }
@@ -372,41 +365,35 @@ class SetuApp {
     const now = Date.now();
     if (now - (this._lastActionAt || 0) < 1200) return;
 
-    // 1. Snooze / resume — always processed, even mid-mode.
-    if (this._matchesAny(heard, SNOOZE_PHRASES)) {
-      this._lastActionAt = now;
-      console.log("🔇 snooze:", heard);
-      if (!this.collisionMuted) this._toggleCollisionMute();
-      return;
-    }
-    if (this._matchesAny(heard, RESUME_PHRASES)) {
-      this._lastActionAt = now;
-      console.log("🔊 resume:", heard);
-      if (this.collisionMuted) this._toggleCollisionMute();
-      return;
-    }
-
-    // 2. Mode commands.
+    // Gate on `_modeInFlight`, NOT on `this.state` — `this.state` is a
+    // display label and not safe to use as a mutex. `_modeInFlight` is
+    // set synchronously, right here, in the same tick as the match —
+    // there is no `await` between reading it and setting it, so two
+    // SpeechRecognition results arriving back to back cannot both pass
+    // this check.
     const cmd = this._parseCommand(heard);
     if (!cmd) return;
 
-    console.log("🎙️ command matched:", cmd, "| state:", this.state);
-
-    if (this.state === "collision") {
-      this._lastActionAt = now;
-      this._dispatchCommand(cmd);
-    } else {
-      console.log("(ignored — a mode is already running, state=" + this.state + ")");
-    }
+    console.log("🎙️ command matched:", cmd, "| inFlight:", this._modeInFlight);
+    this._lastActionAt = now;
+    this._tryInvokeCommand(cmd, "voice");
   }
 
-  _matchesAny(heard, phrases) {
-    for (const p of phrases) {
-      if (heard === p || heard.startsWith(p + " ") || heard.endsWith(" " + p) || heard.includes(" " + p + " ")) {
-        return true;
-      }
+  // Single gate for invoking a mode, shared by voice (_onSpeechResult)
+  // and the tappable command-word buttons in the hint line
+  // (_bindCommandButtons) — both need the exact same synchronous
+  // accept-or-reject-and-mint-epoch sequence, so this lives in one
+  // place rather than being duplicated (and inevitably drifting) across
+  // two call sites. Returns true if the command was accepted.
+  _tryInvokeCommand(cmd, source) {
+    if (this._modeInFlight) {
+      console.log(`(ignored — a mode is already running) [source=${source}]`);
+      return false;
     }
-    return false;
+    this._modeInFlight = true;
+    const epoch = ++this._modeEpoch;
+    this._dispatchCommand(cmd, epoch);
+    return true;
   }
 
   _parseCommand(heard) {
@@ -435,37 +422,45 @@ class SetuApp {
     return match;
   }
 
-  async _dispatchCommand(cmd) {
-    // Keep the collision stream running while a mode runs on REST — the
-    // two transports don't race, and an *urgent* hazard has to be able
-    // to interrupt any answer we're speaking. We just mark ourselves as
-    // "processing" so non-urgent collision updates don't overwrite the
-    // mode card while the user is trying to hear their answer.
+  async _dispatchCommand(cmd, epoch) {
+    // `epoch` was minted synchronously in `_onSpeechResult` at the exact
+    // moment this command was accepted. Every mode function below
+    // receives it and must re-check `_epochLive(epoch)` after each
+    // `await` — see the constructor comment for why a plain state
+    // string can't do this job.
+    console.log(`▶️  dispatch #${epoch}:`, cmd);
     this.state = "processing";
     try {
       switch (cmd) {
-        case "currency": await this._runCurrencyMode(); break;
-        case "describe": await this._runDescribeMode(); break;
-        case "read":     await this._runReadMode(); break;
-        case "question": await this._runQuestionMode(); break;
+        case "currency": await this._runCurrencyMode(epoch); break;
+        case "describe": await this._runDescribeMode(epoch); break;
+        case "read":     await this._runReadMode(epoch); break;
+        case "question": await this._runQuestionMode(epoch); break;
+        case "detect":   await this._runDetectMode(epoch); break;
       }
     } catch (err) {
-      console.error("[mode crashed]", cmd, err);
+      console.error(`❌ [mode #${epoch} crashed]`, cmd, err);
     } finally {
-      // Guarantee we return to the ready state even if the mode threw.
-      // Without this a single fetch error would leave us stuck in
-      // "processing" and every future command would be silently
-      // ignored by the `_onSpeechResult` state check.
-      if (this.state !== "collision") this._returnToCollision();
+      // Guarantee we return to the ready state even if the mode threw,
+      // AND even if a later command already superseded us — but only
+      // touch shared state if we're still the live epoch. If we were
+      // superseded, whoever superseded us owns the return-to-idle step;
+      // doing it here too would double-fire _enterIdleMode (harmless-ish,
+      // but also clears `_lastActionAt` that the newer run may already
+      // be relying on).
+      if (this._epochLive(epoch)) {
+        this._modeInFlight = false;
+        this._returnToIdle();
+      } else {
+        console.log(`⏭️  dispatch #${epoch} finished but was superseded — not touching shared state`);
+      }
     }
   }
 
-  _returnToCollision() {
-    this.state = "collision";
-    this._lastActionAt = 0;          // clear debounce so the next command fires immediately
-    this.lastCollisionState = null;  // let the next warn/clear re-announce
-    this._enterCollisionMode();
-    console.log("↩️  returned to collision watch — ready for next command");
+  _returnToIdle() {
+    this._lastActionAt = 0;   // clear debounce so the next command fires immediately
+    this._enterIdleMode();
+    console.log("↩️  returned to idle — ready for next command");
   }
 
   // -------- Mode: currency (POST /api/vlm with a currency-specific prompt) --------
@@ -477,18 +472,21 @@ class SetuApp {
   // empty, Gemma politely says so instead of us silently returning
   // garbage.
 
-  async _runCurrencyMode() {
+  async _runCurrencyMode(epoch) {
     this._setModeCard("mode", "💵", "Currency", "Scanning for notes…");
     // Small delay so the user has time to steady the camera. No spoken
     // prompt — the user just said "currency", they know they've been
     // heard from the visual state change.
     await this._sleep(600);
+    if (!this._epochLive(epoch)) return;   // superseded during the sleep
+
     const b64 = this._captureFrame(HIRES_MAX_DIM, HIRES_QUALITY);
     if (!b64) {
-      await this._sayAndWait("Camera not ready.");
-      this._returnToCollision();
+      console.warn(`[currency #${epoch}] camera not ready — video.readyState=${this.video.readyState}, dims=${this.video.videoWidth}x${this.video.videoHeight}`);
+      if (this._epochLive(epoch)) await this._sayAndWait("Camera not ready.");
       return;
     }
+
     let speak = "No currency detected.";
     try {
       const res = await fetch("/api/currency", {
@@ -496,28 +494,34 @@ class SetuApp {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ image_b64: b64 }),
       });
+      if (!this._epochLive(epoch)) return;   // superseded while the request was in flight
       const data = await res.json();
+      if (!this._epochLive(epoch)) return;
       speak = data.speak || speak;
       this._setModeCard("mode", "💵", "Currency", speak);
     } catch (err) {
-      console.error(err);
+      console.error(`[currency #${epoch}] fetch failed:`, err);
       speak = "Could not reach the server.";
     }
-    try { await this._sayAndWait(speak); } catch (_) {}
-    this._returnToCollision();
+    if (this._epochLive(epoch)) {
+      try { await this._sayAndWait(speak); } catch (_) {}
+    }
   }
 
   // -------- Mode: describe --------
 
-  async _runDescribeMode() {
+  async _runDescribeMode(epoch) {
     this._setModeCard("mode", "👁️", "Describe scene", "Looking…");
     await this._sleep(400);
+    if (!this._epochLive(epoch)) return;
+
     const b64 = this._captureFrame(HIRES_MAX_DIM, HIRES_QUALITY);
     if (!b64) {
-      await this._sayAndWait("Camera not ready.");
-      this._returnToCollision();
+      console.warn(`[describe #${epoch}] camera not ready — video.readyState=${this.video.readyState}, dims=${this.video.videoWidth}x${this.video.videoHeight}`);
+      if (this._epochLive(epoch)) await this._sayAndWait("Camera not ready.");
       return;
     }
+
     let speak = "I could not describe the scene.";
     try {
       const res = await fetch("/api/vlm", {
@@ -525,30 +529,36 @@ class SetuApp {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ image_b64: b64 }),
       });
+      if (!this._epochLive(epoch)) return;
       const data = await res.json();
+      if (!this._epochLive(epoch)) return;
       speak = data.speak || speak;
       this._setModeCard("mode", "👁️", "Describe scene", speak);
     } catch (err) {
-      console.error(err);
+      console.error(`[describe #${epoch}] fetch failed:`, err);
       speak = "Could not reach the server.";
     }
-    try { await this._sayAndWait(speak); } catch (_) {}
-    this._returnToCollision();
+    if (this._epochLive(epoch)) {
+      try { await this._sayAndWait(speak); } catch (_) {}
+    }
   }
 
   // -------- Mode: read (OCR + Gemma summary) --------
 
-  async _runReadMode() {
+  async _runReadMode(epoch) {
     this._setModeCard("mode", "📖", "Read text", "Reading…");
     await this._sleep(400);
+    if (!this._epochLive(epoch)) return;
+
     // High-res capture — OCR needs the detail. The 640px collision
     // frame reads as garbage; text needs ~1600px to be legible.
     const b64 = this._captureFrame(HIRES_MAX_DIM, HIRES_QUALITY);
     if (!b64) {
-      await this._sayAndWait("Camera not ready.");
-      this._returnToCollision();
+      console.warn(`[read #${epoch}] camera not ready — video.readyState=${this.video.readyState}, dims=${this.video.videoWidth}x${this.video.videoHeight}`);
+      if (this._epochLive(epoch)) await this._sayAndWait("Camera not ready.");
       return;
     }
+
     let speak = "No text found.";
     try {
       const res = await fetch("/api/ocr", {
@@ -559,55 +569,122 @@ class SetuApp {
           question: "Read the visible text and give me a one or two sentence summary of what it says.",
         }),
       });
+      if (!this._epochLive(epoch)) return;
       const data = await res.json();
+      if (!this._epochLive(epoch)) return;
       speak = data.speak || speak;
       this._setModeCard("mode", "📖", "Read text", speak);
     } catch (err) {
-      console.error(err);
+      console.error(`[read #${epoch}] fetch failed:`, err);
       speak = "Could not reach the server.";
     }
-    try { await this._sayAndWait(speak); } catch (_) {}
-    this._returnToCollision();
+    if (this._epochLive(epoch)) {
+      try { await this._sayAndWait(speak); } catch (_) {}
+    }
   }
 
   // -------- Mode: question (record audio -> STT -> Gemma) --------
 
-  async _runQuestionMode() {
+  async _runQuestionMode(epoch) {
     // Question mode is the one place we DO need a spoken prompt — the
     // user has to know that mic recording has started.
     this._setModeCard("listen", "🎤", "Ask a question", "Ask your question now…");
     await this._sayAndWait("Ask your question.");
+    if (!this._epochLive(epoch)) return;
+
     try {
       const audioB64 = await this._recordAudio(QUESTION_RECORD_MS);
+      if (!this._epochLive(epoch)) return;
+
       this._setModeCard("mode", "🧠", "Ask a question", "Transcribing…");
       const sttRes = await fetch("/api/stt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ audio_b64: audioB64 }),
       });
+      if (!this._epochLive(epoch)) return;
       const sttData = await sttRes.json();
+      if (!this._epochLive(epoch)) return;
+
       const question = (sttData.text || "").trim();
       if (!question) {
         await this._sayAndWait("I could not hear a question. Try again.");
-        this._returnToCollision();
         return;
       }
+
       this._setModeCard("mode", "🧠", "Question", `“${question}” — thinking…`);
       const b64 = this._captureFrame(HIRES_MAX_DIM, HIRES_QUALITY);
+      if (!b64) {
+        console.warn(`[question #${epoch}] camera not ready — video.readyState=${this.video.readyState}`);
+        if (this._epochLive(epoch)) await this._sayAndWait("Camera not ready.");
+        return;
+      }
       const res = await fetch("/api/vlm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ image_b64: b64, question }),
       });
+      if (!this._epochLive(epoch)) return;
       const data = await res.json();
+      if (!this._epochLive(epoch)) return;
+
       const speak = data.speak || "I don't know the answer.";
       this._setModeCard("mode", "🧠", "Question", speak);
       await this._sayAndWait(speak);
     } catch (err) {
-      console.error(err);
-      await this._sayAndWait("Something went wrong recording your question.");
+      console.error(`[question #${epoch}] failed:`, err);
+      if (this._epochLive(epoch)) await this._sayAndWait("Something went wrong recording your question.");
     }
-    this._returnToCollision();
+  }
+
+  // -------- Mode: detect (one-shot proximity/collision scan) --------
+  //
+  // This used to be a continuous background stream that ran as the
+  // app's default state. It's now a one-shot scan, same shape as
+  // currency/describe/read: capture a frame, ask the server, speak the
+  // result, done. See the top-of-file note for the safety trade-off
+  // this implies (no background watcher between scans anymore).
+
+  async _runDetectMode(epoch) {
+    this._setModeCard("mode", "🛡️", "Detecting", "Scanning surroundings…");
+    await this._sleep(300);
+    if (!this._epochLive(epoch)) return;
+
+    const b64 = this._captureFrame();   // fast/small capture — object detection doesn't need fine detail
+    if (!b64) {
+      console.warn(`[detect #${epoch}] camera not ready — video.readyState=${this.video.readyState}, dims=${this.video.videoWidth}x${this.video.videoHeight}`);
+      if (this._epochLive(epoch)) await this._sayAndWait("Camera not ready.");
+      return;
+    }
+
+    let speak = "Path is clear.";
+    let severity = null;
+    try {
+      const res = await fetch("/api/detect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image_b64: b64 }),
+      });
+      if (!this._epochLive(epoch)) return;
+      const data = await res.json();
+      if (!this._epochLive(epoch)) return;
+      speak = data.speak || speak;
+      severity = data.collision_alert || null;
+      const cardState = severity === "urgent" ? "urgent" : severity === "warn" ? "warn" : "clear";
+      const icon = severity === "urgent" ? "🛑" : severity === "warn" ? "⚠️" : "🛡️";
+      const label = severity === "urgent" ? "STOP" : severity === "warn" ? "Careful" : "Clear";
+      this._setModeCard(cardState, icon, label, speak);
+    } catch (err) {
+      console.error(`[detect #${epoch}] fetch failed:`, err);
+      speak = "Could not reach the server.";
+    }
+
+    if (severity === "warn") this._safeVibrate(PROXIMITY_HAPTICS.warn);
+    if (severity === "urgent") this._safeVibrate(PROXIMITY_HAPTICS.urgent);
+
+    if (this._epochLive(epoch)) {
+      try { await this._sayAndWait(speak); } catch (_) {}
+    }
   }
 
   // -------- Audio recording for question mode --------
@@ -711,9 +788,9 @@ class SetuApp {
     } catch (_) { /* network hiccup, transcript still shown */ }
   }
 
-  // Speak text and only resolve after playback ends (or 8s max as a
-  // safety net). Used inside modes so the "return to collision" step
-  // doesn't stomp on the answer mid-sentence.
+  // Speak text and only resolve after playback ends (or 12s max as a
+  // safety net). Used inside modes so the "return to idle" step doesn't
+  // stomp on the answer mid-sentence.
   async _sayAndWait(text) {
     if (!text) return;
     this._interruptSpeech();

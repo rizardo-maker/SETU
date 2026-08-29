@@ -70,6 +70,32 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="SETU", lifespan=lifespan)
 
 
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request, exc: Exception):
+    """
+    Last-resort safety net for every REST route. Without this, an
+    unexpected exception anywhere in a voice-command endpoint (a model
+    library throwing on an edge-case input, a network hiccup mid-call)
+    propagates as a bare 500 with no JSON body — the client's
+    `await res.json()` then throws its own SyntaxError, and the whole
+    voice command silently dies with nothing spoken and nothing logged
+    client-side. This guarantees every request gets back well-formed
+    JSON with a "speak" field the client can always fall back to,
+    fulfilling the file's top-of-file rule: every failure path ends in
+    a spoken message, never a silent drop.
+    """
+    from fastapi.responses import JSONResponse
+    log.error("[UNHANDLED] %s %s -> %s", request.method, request.url.path, exc, exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": str(exc),
+            "speak": "Something went wrong. Please try again.",
+            "answered": False,
+        },
+    )
+
+
 def decode_jpeg_b64(image_b64: str) -> np.ndarray:
     raw = base64.b64decode(image_b64)
     arr = np.frombuffer(raw, dtype=np.uint8)
@@ -421,6 +447,13 @@ async def api_stt(payload: dict):
     except stt.STTUnavailable as e:
         log.warning("[API/STT] STT unavailable: %s", e)
         return JSONResponse(status_code=503, content={"error": str(e), "text": ""})
+    except Exception as e:
+        # Belt-and-suspenders: whisper's internals have known edge-case
+        # crashes on malformed/near-silent audio (see stt.py). Whatever
+        # the cause, "question" mode must degrade to "I didn't hear a
+        # question" rather than propagate a raw 500 to the browser.
+        log.error("[API/STT] Unexpected transcription error: %s", e, exc_info=True)
+        return JSONResponse(content={"text": ""})
     log.info("[API/STT] Transcribed: %r", text)
     return JSONResponse(content={"text": text})
 
@@ -487,6 +520,50 @@ async def api_currency(payload: dict):
     except vlm.VLMUnavailable:
         speak = "I can see currency but couldn't read the denomination."
     return JSONResponse(content={"answered": True, "speak": speak, "denominations": [], "total_value": 0})
+
+
+@app.post("/api/detect")
+async def api_detect(payload: dict):
+    """Single-shot proximity/collision scan via the general YOLO detector.
+    Accepts: {"image_b64": "..."}
+    Returns: {"speak": "...", "answered": bool, "collision_alert": "warn"|"urgent"|None, "detection_count": N}
+
+    On-demand only — see server/tier1/detect.py's `scan_for_collision()`
+    for the hazard-class list and area-fraction thresholds. This used to
+    run continuously over the WebSocket at ~3fps as the app's default
+    idle state; it's now invoked explicitly (voice "detect" / tap), same
+    shape as currency/describe/read, so the user controls when a scan
+    happens instead of it always running in the background.
+    """
+    from fastapi.responses import JSONResponse
+    image_b64 = payload.get("image_b64", "")
+    if not image_b64:
+        return JSONResponse(status_code=400, content={"error": "missing image_b64"})
+    try:
+        frame = decode_jpeg_b64(image_b64)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+    if not detect.detector.ready:
+        return JSONResponse(content={
+            "answered": False, "collision_alert": None, "detection_count": 0,
+            "speak": "Proximity detection isn't available. Install ultralytics.",
+        })
+
+    try:
+        threats = await asyncio.to_thread(detect.detector.scan_for_collision, frame)
+    except RuntimeError as e:
+        return JSONResponse(status_code=500, content={"error": str(e), "speak": "Proximity scan failed."})
+
+    speak, severity = detect.detector.speak_collision(threats)
+    log.info("[API/DETECT] threats=%d severity=%s speak=%r", len(threats), severity, speak)
+    return JSONResponse(content={
+        "answered": bool(threats),
+        "collision_alert": severity,
+        "detection_count": len(threats),
+        "label": ", ".join(sorted({t.label for t in threats})) if threats else None,
+        "speak": speak,
+    })
 
 
 @app.post("/api/vlm")

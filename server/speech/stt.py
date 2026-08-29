@@ -48,10 +48,21 @@ class SpeechToText:
                 "Speech recognition isn't available. Install faster-whisper "
                 "(requirements-full.txt) to enable voice commands."
             )
-        segments, _info = self._model.transcribe(
-            io.BytesIO(wav_bytes), language=config.STT_LANGUAGE, vad_filter=True
-        )
-        return " ".join(seg.text.strip() for seg in segments).strip()
+        try:
+            segments, _info = self._model.transcribe(
+                io.BytesIO(wav_bytes), language=config.STT_LANGUAGE, vad_filter=True
+            )
+            return " ".join(seg.text.strip() for seg in segments).strip()
+        except ValueError:
+            # faster-whisper's language-autodetect step does max() over
+            # detected-language candidates; when VAD strips the whole clip
+            # as silence (near-silent mic input — very plausible for the
+            # "hey setu question" flow if the user pauses or the room is
+            # quiet) there are zero candidates and it raises a bare
+            # ValueError. That's "no speech heard", not a server failure —
+            # every caller already handles empty string as "ask again".
+            log.info("STT: no speech detected in %d bytes of audio (VAD stripped everything)", len(wav_bytes))
+            return ""
 
 
 engine = SpeechToText()

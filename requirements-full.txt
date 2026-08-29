@@ -11,9 +11,10 @@ onnx==1.16.2
 onnxruntime==1.19.2          # add onnxruntime-silicon or the CoreML EP build for speed on Apple chips
 
 # OCR (Tier 1 text reading)
-paddleocr==2.8.1
+rapidocr_onnxruntime==1.3.24  # primary — self-contained ONNX PaddleOCR, no external binary needed
+paddleocr==2.8.1              # fallback if rapidocr fails to install
 paddlepaddle==2.6.2
-pytesseract==0.3.13   # lighter fallback — also needs the `tesseract` binary on PATH (brew install tesseract)
+pytesseract==0.3.13           # lightest fallback — also needs the `tesseract` binary on PATH (brew install tesseract)
 
 # Object / obstacle detection — AGPL-3.0, see README licensing note
 ultralytics==8.2.103
