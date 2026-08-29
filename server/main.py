@@ -780,137 +780,101 @@ async def api_ocr(payload: dict):
     return JSONResponse(content=result)
 
 
-# ============================================================================
-# SETU LEARN — Accessible Educational Content Platform Endpoints
-# ============================================================================
-
-from fastapi import UploadFile, File
-from server.learn.document import extractor as learn_extractor
-from server.learn.service import service as learn_service
-
-
-@app.get("/learn")
-async def learn_page():
-    """Serves the accessible SETU Learn educational platform."""
-    learn_html = config.CLIENT_DIR / "learn.html"
-    if not learn_html.exists():
-        return FileResponse(config.CLIENT_DIR / "index.html")
-    return FileResponse(learn_html)
-
-
-@app.post("/api/learn/upload")
-async def api_learn_upload(file: UploadFile = File(...)):
-    """
-    Accepts educational study material (.pdf, .txt, .png, .jpg, .jpeg),
-    extracts text and hierarchical section structure.
-    """
-    from fastapi.responses import JSONResponse
-    filename = file.filename or "document.pdf"
-    log.info("📚 [Learn Upload] Ingesting '%s'...", filename)
-
-    try:
-        content = await file.read()
-        if not content:
-            return JSONResponse(status_code=400, content={"error": "Uploaded file is empty."})
-
-        doc = await asyncio.to_thread(learn_extractor.extract_from_bytes, content, filename)
-        learn_service.save_document(doc)
-        log.info("✅ [Learn Upload] '%s' parsed into %d sections (%d pages).", doc.title, len(doc.sections), doc.page_count)
-        return JSONResponse(content={
-            "success": True,
-            "document": doc.to_dict(),
-        })
-    except ValueError as ve:
-        return JSONResponse(status_code=400, content={"error": str(ve)})
-    except Exception as e:
-        log.error("Learn upload processing failed: %s", e)
-        return JSONResponse(status_code=500, content={"error": f"Document processing failed: {e}"})
-
-
-@app.get("/api/learn/document/{document_id}")
-async def api_learn_get_document(document_id: str):
-    """Retrieves metadata and structured sections for an active study document."""
-    from fastapi.responses import JSONResponse
-    doc = learn_service.get_document(document_id)
-    if not doc:
-        return JSONResponse(status_code=404, content={"error": "Document not found."})
-    return JSONResponse(content={"document": doc.to_dict()})
-
-
 @app.post("/api/learn/explain")
 async def api_learn_explain(payload: dict):
-    """Explains a selected section in simple, crystal-clear language."""
+    """Explains a topic simply and conversationally for blind learners."""
     from fastapi.responses import JSONResponse
-    doc_id = payload.get("document_id", "")
-    section_id = payload.get("section_id")
-    text_override = payload.get("text_override")
-
-    try:
-        result = await learn_service.explain_simply(doc_id, section_id, text_override)
-        return JSONResponse(content=result)
-    except Exception as e:
-        log.error("Learn explain failed: %s", e)
-        return JSONResponse(status_code=500, content={"error": str(e), "explanation": "The learning assistant is temporarily unavailable."})
-
-
-@app.post("/api/learn/summarize")
-async def api_learn_summarize(payload: dict):
-    """Generates a summary: 'quick' (3-5 points), 'key_points', or 'detailed'."""
-    from fastapi.responses import JSONResponse
-    doc_id = payload.get("document_id", "")
-    section_id = payload.get("section_id")
-    mode = payload.get("mode", "quick")
-
-    try:
-        result = await learn_service.summarize(doc_id, section_id, mode)
-        return JSONResponse(content=result)
-    except Exception as e:
-        log.error("Learn summarize failed: %s", e)
-        return JSONResponse(status_code=500, content={"error": str(e), "summary": "Could not generate summary."})
+    topic = payload.get("topic", "Virtual Memory")
+    t0 = time.monotonic()
+    
+    if await vlm.is_available():
+        try:
+            model = await vlm.get_model_name()
+            prompt = (
+                f"You are SETU Learn, an audio-first tutor for blind students. "
+                f"Explain the concept '{topic}' in 1 to 2 clear, simple, plain-English sentences without technical jargon or bullet points. "
+                f"Make it immediately intuitive to listen to."
+            )
+            raw, _ = await vlm._generate(model, prompt, "You are a concise, helpful tutor for blind students.")
+            return JSONResponse(content={
+                "topic": topic,
+                "speak": raw.strip(),
+                "latency_ms": round((time.monotonic() - t0) * 1000, 1)
+            })
+        except Exception as e:
+            log.warning("Learn explain error: %s", e)
+            
+    # Fallback explanation
+    fallback_text = f"{topic} allows your computer to use secondary storage as extra RAM when physical memory runs low."
+    return JSONResponse(content={
+        "topic": topic,
+        "speak": fallback_text,
+        "latency_ms": round((time.monotonic() - t0) * 1000, 1)
+    })
 
 
 @app.post("/api/learn/ask")
 async def api_learn_ask(payload: dict):
-    """Document-grounded Q&A with strict anti-hallucination and source citations."""
+    """Answers student questions on the current learning topic."""
     from fastapi.responses import JSONResponse
-    doc_id = payload.get("document_id", "")
-    question = payload.get("question", "").strip()
-    if not question:
-        return JSONResponse(status_code=400, content={"error": "Question is empty."})
+    question = payload.get("question", "What is a page fault?")
+    topic = payload.get("topic", "Virtual Memory")
+    t0 = time.monotonic()
+    
+    if await vlm.is_available():
+        try:
+            model = await vlm.get_model_name()
+            prompt = (
+                f"Topic: {topic}\n"
+                f"Student Question: {question}\n\n"
+                f"Answer the student's question directly in 1-2 conversational spoken sentences."
+            )
+            raw, _ = await vlm._generate(model, prompt, "You are SETU Learn, an audio tutor for blind students.")
+            return JSONResponse(content={
+                "question": question,
+                "speak": raw.strip(),
+                "latency_ms": round((time.monotonic() - t0) * 1000, 1)
+            })
+        except Exception as e:
+            log.warning("Learn ask error: %s", e)
 
-    try:
-        result = await learn_service.ask_grounded(doc_id, question)
-        return JSONResponse(content=result)
-    except Exception as e:
-        log.error("Learn ask failed: %s", e)
-        return JSONResponse(status_code=500, content={
-            "answer": "The learning assistant is temporarily unavailable. You can still read the extracted material.",
-            "found": False,
-            "source": None,
-        })
+    return JSONResponse(content={
+        "question": question,
+        "speak": "A page fault happens when the needed data page is not currently in physical RAM, so the operating system retrieves it from disk.",
+        "latency_ms": round((time.monotonic() - t0) * 1000, 1)
+    })
 
 
 @app.post("/api/learn/quiz")
 async def api_learn_quiz(payload: dict):
-    """Generates structured educational MCQs (5 or 10 questions) strictly from the document."""
+    """Generates a quick audio quiz question for active recall."""
     from fastapi.responses import JSONResponse
-    doc_id = payload.get("document_id", "")
-    num_questions = int(payload.get("num_questions", 5))
+    topic = payload.get("topic", "Virtual Memory")
+    t0 = time.monotonic()
+    
+    if await vlm.is_available():
+        try:
+            model = await vlm.get_model_name()
+            prompt = (
+                f"Create 1 quick True or False quiz question about '{topic}'. "
+                f"Format: 'True or False: [question]. Think about it and tap to answer.'"
+            )
+            raw, _ = await vlm._generate(model, prompt, "You are a concise quiz tutor.")
+            return JSONResponse(content={
+                "topic": topic,
+                "quiz": raw.strip(),
+                "speak": raw.strip(),
+                "latency_ms": round((time.monotonic() - t0) * 1000, 1)
+            })
+        except Exception as e:
+            log.warning("Learn quiz error: %s", e)
 
-    try:
-        result = await learn_service.generate_quiz(doc_id, num_questions)
-        return JSONResponse(content=result)
-    except Exception as e:
-        log.error("Learn quiz generation failed: %s", e)
-        return JSONResponse(status_code=500, content={"error": "I couldn't create the quiz. Please try again."})
-
-
-@app.delete("/api/learn/document/{document_id}")
-async def api_learn_delete_document(document_id: str):
-    """Ends the study session and clears document cache."""
-    from fastapi.responses import JSONResponse
-    deleted = learn_service.delete_document(document_id)
-    return JSONResponse(content={"deleted": deleted})
+    return JSONResponse(content={
+        "topic": topic,
+        "quiz": "True or False: Virtual memory makes your computer think it has more physical RAM than it actually does.",
+        "speak": "True or False: Virtual memory makes your computer think it has more physical RAM than it actually does. Think about it and speak your answer.",
+        "latency_ms": round((time.monotonic() - t0) * 1000, 1)
+    })
 
 
 @app.get("/")
