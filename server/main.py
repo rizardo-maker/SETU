@@ -676,84 +676,11 @@ async def api_proximity(payload: dict):
     })
 
 
-@app.post("/api/navigate")
-async def api_navigate(payload: dict):
-    """
-    Core SRS Feature: Navigate Mode.
-    Finds room/sign targets (e.g. 'C-214', 'Exit', 'Office', 'Washroom')
-    while enforcing the strict priority hierarchy:
-      1. Critical / Path-blocking obstacle warnings (e.g. "Chair ahead. Move slightly left.")
-      2. Target detection (e.g. "C-214 detected on your right.")
-      3. Searching status (e.g. "Searching for C-214. Path is clear.")
-    """
-    from fastapi.responses import JSONResponse
-    image_b64 = payload.get("image_b64", "")
-    target = payload.get("target", "").strip()
-    if not image_b64:
-        return JSONResponse(status_code=400, content={"error": "missing image_b64"})
-    if not target:
-        target = "signboard"
-
-    try:
-        frame = decode_jpeg_b64(image_b64)
-    except ValueError as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
-
-    t0 = time.monotonic()
-
-    # Priority 1: Check for critical or path-blocking obstacles
-    obstacle_warning = None
-    if detect.detector.ready:
-        threats = await asyncio.to_thread(detect.detector.scan_for_collision, frame)
-        if threats:
-            speak_obs, sev = detect.detector.speak_collision(threats)
-            if sev == "urgent":
-                obstacle_warning = f"Stop! {threats[0].label} right in front of you."
-            elif sev == "warn":
-                obstacle_warning = f"{threats[0].label.capitalize()} ahead. Move carefully."
-
-    # Priority 2: Search for target room / sign in frame using RapidOCR
-    target_match = None
-    if ocr.engine.ready:
-        target_match = await asyncio.to_thread(ocr.engine.find_target, frame, target)
-
-    # Assemble prioritized voice response
-    if obstacle_warning:
-        if target_match and target_match.get("found"):
-            speak = f"{obstacle_warning} {target} detected {target_match['direction']}."
-        else:
-            speak = obstacle_warning
-        answered = True
-    elif target_match and target_match.get("found"):
-        speak = f"{target} detected {target_match['direction']}."
-        answered = True
-    else:
-        speak = f"Searching for {target}. Path is clear."
-        answered = False
-
-    return JSONResponse(content={
-        "answered": answered,
-        "target": target,
-        "target_found": bool(target_match and target_match.get("found")),
-        "obstacle_warning": obstacle_warning,
-        "direction": target_match.get("direction") if target_match else None,
-        "speak": speak,
-        "latency_ms": round((time.monotonic() - t0) * 1000, 1),
-    })
-
-
 @app.post("/api/detect")
 async def api_detect(payload: dict):
     """Single-shot proximity/collision scan via the general YOLO detector.
     Accepts: {"image_b64": "..."}
     Returns: {"speak": "...", "answered": bool, "collision_alert": "warn"|"urgent"|None, "detection_count": N}
-
-    On-demand only — see server/tier1/detect.py's `scan_for_collision()`
-    for the hazard-class list and area-fraction thresholds. This used to
-    run continuously over the WebSocket at ~3fps as the app's default
-    idle state; it's now invoked explicitly (voice "detect" / tap), same
-    shape as currency/describe/read, so the user controls when a scan
-    happens instead of it always running in the background.
     """
     from fastapi.responses import JSONResponse
     image_b64 = payload.get("image_b64", "")
@@ -855,103 +782,6 @@ async def api_ocr(payload: dict):
     result.setdefault("latency_ms", round((time.monotonic() - t0) * 1000, 1))
     log.info("[API/OCR] Response (%.0fms, tier=%s): '%s'", result["latency_ms"], result["tier"], result["speak"][:100])
     return JSONResponse(content=result)
-
-
-@app.post("/api/learn/explain")
-async def api_learn_explain(payload: dict):
-    """Explains a topic simply and conversationally for blind learners."""
-    from fastapi.responses import JSONResponse
-    topic = payload.get("topic", "Virtual Memory")
-    t0 = time.monotonic()
-    
-    if await vlm.is_available():
-        try:
-            model = await vlm.get_model_name()
-            prompt = (
-                f"You are SETU Learn, an audio-first tutor for blind students. "
-                f"Explain the concept '{topic}' in 1 to 2 clear, simple, plain-English sentences without technical jargon or bullet points. "
-                f"Make it immediately intuitive to listen to."
-            )
-            raw, _ = await vlm._generate(model, prompt, "You are a concise, helpful tutor for blind students.")
-            return JSONResponse(content={
-                "topic": topic,
-                "speak": raw.strip(),
-                "latency_ms": round((time.monotonic() - t0) * 1000, 1)
-            })
-        except Exception as e:
-            log.warning("Learn explain error: %s", e)
-            
-    # Fallback explanation
-    fallback_text = f"{topic} allows your computer to use secondary storage as extra RAM when physical memory runs low."
-    return JSONResponse(content={
-        "topic": topic,
-        "speak": fallback_text,
-        "latency_ms": round((time.monotonic() - t0) * 1000, 1)
-    })
-
-
-@app.post("/api/learn/ask")
-async def api_learn_ask(payload: dict):
-    """Answers student questions on the current learning topic."""
-    from fastapi.responses import JSONResponse
-    question = payload.get("question", "What is a page fault?")
-    topic = payload.get("topic", "Virtual Memory")
-    t0 = time.monotonic()
-    
-    if await vlm.is_available():
-        try:
-            model = await vlm.get_model_name()
-            prompt = (
-                f"Topic: {topic}\n"
-                f"Student Question: {question}\n\n"
-                f"Answer the student's question directly in 1-2 conversational spoken sentences."
-            )
-            raw, _ = await vlm._generate(model, prompt, "You are SETU Learn, an audio tutor for blind students.")
-            return JSONResponse(content={
-                "question": question,
-                "speak": raw.strip(),
-                "latency_ms": round((time.monotonic() - t0) * 1000, 1)
-            })
-        except Exception as e:
-            log.warning("Learn ask error: %s", e)
-
-    return JSONResponse(content={
-        "question": question,
-        "speak": "A page fault happens when the needed data page is not currently in physical RAM, so the operating system retrieves it from disk.",
-        "latency_ms": round((time.monotonic() - t0) * 1000, 1)
-    })
-
-
-@app.post("/api/learn/quiz")
-async def api_learn_quiz(payload: dict):
-    """Generates a quick audio quiz question for active recall."""
-    from fastapi.responses import JSONResponse
-    topic = payload.get("topic", "Virtual Memory")
-    t0 = time.monotonic()
-    
-    if await vlm.is_available():
-        try:
-            model = await vlm.get_model_name()
-            prompt = (
-                f"Create 1 quick True or False quiz question about '{topic}'. "
-                f"Format: 'True or False: [question]. Think about it and tap to answer.'"
-            )
-            raw, _ = await vlm._generate(model, prompt, "You are a concise quiz tutor.")
-            return JSONResponse(content={
-                "topic": topic,
-                "quiz": raw.strip(),
-                "speak": raw.strip(),
-                "latency_ms": round((time.monotonic() - t0) * 1000, 1)
-            })
-        except Exception as e:
-            log.warning("Learn quiz error: %s", e)
-
-    return JSONResponse(content={
-        "topic": topic,
-        "quiz": "True or False: Virtual memory makes your computer think it has more physical RAM than it actually does.",
-        "speak": "True or False: Virtual memory makes your computer think it has more physical RAM than it actually does. Think about it and speak your answer.",
-        "latency_ms": round((time.monotonic() - t0) * 1000, 1)
-    })
 
 
 @app.get("/")

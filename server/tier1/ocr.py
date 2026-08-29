@@ -213,58 +213,5 @@ class OCREngine:
 
         raise RuntimeError("OCR Engine failure")
 
-    def find_target(self, bgr_frame: np.ndarray, target_query: str) -> Optional[dict]:
-        """
-        Searches the frame for a specific navigation sign / room target (e.g. 'C-214', 'Exit', 'Room 101').
-        Returns dict with match text, direction ('on your left', 'straight ahead', 'on your right'), and confidence.
-        """
-        if not self.ready or not target_query:
-            return None
-
-        target_norm = re.sub(r'[^a-zA-Z0-9]', '', target_query.lower())
-        if not target_norm:
-            return None
-
-        h, w = bgr_frame.shape[:2]
-
-        if self.backend == "rapidocr":
-            result, _ = self._engine(bgr_frame)
-            if not result:
-                try:
-                    gray = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY)
-                    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-                    enhanced = cv2.cvtColor(clahe.apply(gray), cv2.COLOR_GRAY2BGR)
-                    result, _ = self._engine(enhanced)
-                except Exception:
-                    pass
-
-            if not result:
-                return None
-
-            for item in result:
-                if len(item) >= 2:
-                    box = item[0]
-                    text_str = str(item[1]).strip()
-                    conf = float(item[2]) if len(item) > 2 else 0.90
-                    clean_text = re.sub(r'[^a-zA-Z0-9]', '', text_str.lower())
-                    if target_norm in clean_text or clean_text in target_norm:
-                        x_coords = [p[0] for p in box] if box else [0]
-                        x_center = (sum(x_coords) / len(x_coords)) / w if w > 0 else 0.5
-                        if x_center < 0.35:
-                            direction = "on your left"
-                        elif x_center > 0.65:
-                            direction = "on your right"
-                        else:
-                            direction = "straight ahead"
-                        return {
-                            "found": True,
-                            "target": target_query,
-                            "matched_text": text_str,
-                            "direction": direction,
-                            "confidence": round(conf, 3),
-                        }
-
-        return None
-
 
 engine = OCREngine()
