@@ -780,6 +780,139 @@ async def api_ocr(payload: dict):
     return JSONResponse(content=result)
 
 
+# ============================================================================
+# SETU LEARN — Accessible Educational Content Platform Endpoints
+# ============================================================================
+
+from fastapi import UploadFile, File
+from server.learn.document import extractor as learn_extractor
+from server.learn.service import service as learn_service
+
+
+@app.get("/learn")
+async def learn_page():
+    """Serves the accessible SETU Learn educational platform."""
+    learn_html = config.CLIENT_DIR / "learn.html"
+    if not learn_html.exists():
+        return FileResponse(config.CLIENT_DIR / "index.html")
+    return FileResponse(learn_html)
+
+
+@app.post("/api/learn/upload")
+async def api_learn_upload(file: UploadFile = File(...)):
+    """
+    Accepts educational study material (.pdf, .txt, .png, .jpg, .jpeg),
+    extracts text and hierarchical section structure.
+    """
+    from fastapi.responses import JSONResponse
+    filename = file.filename or "document.pdf"
+    log.info("📚 [Learn Upload] Ingesting '%s'...", filename)
+
+    try:
+        content = await file.read()
+        if not content:
+            return JSONResponse(status_code=400, content={"error": "Uploaded file is empty."})
+
+        doc = await asyncio.to_thread(learn_extractor.extract_from_bytes, content, filename)
+        learn_service.save_document(doc)
+        log.info("✅ [Learn Upload] '%s' parsed into %d sections (%d pages).", doc.title, len(doc.sections), doc.page_count)
+        return JSONResponse(content={
+            "success": True,
+            "document": doc.to_dict(),
+        })
+    except ValueError as ve:
+        return JSONResponse(status_code=400, content={"error": str(ve)})
+    except Exception as e:
+        log.error("Learn upload processing failed: %s", e)
+        return JSONResponse(status_code=500, content={"error": f"Document processing failed: {e}"})
+
+
+@app.get("/api/learn/document/{document_id}")
+async def api_learn_get_document(document_id: str):
+    """Retrieves metadata and structured sections for an active study document."""
+    from fastapi.responses import JSONResponse
+    doc = learn_service.get_document(document_id)
+    if not doc:
+        return JSONResponse(status_code=404, content={"error": "Document not found."})
+    return JSONResponse(content={"document": doc.to_dict()})
+
+
+@app.post("/api/learn/explain")
+async def api_learn_explain(payload: dict):
+    """Explains a selected section in simple, crystal-clear language."""
+    from fastapi.responses import JSONResponse
+    doc_id = payload.get("document_id", "")
+    section_id = payload.get("section_id")
+    text_override = payload.get("text_override")
+
+    try:
+        result = await learn_service.explain_simply(doc_id, section_id, text_override)
+        return JSONResponse(content=result)
+    except Exception as e:
+        log.error("Learn explain failed: %s", e)
+        return JSONResponse(status_code=500, content={"error": str(e), "explanation": "The learning assistant is temporarily unavailable."})
+
+
+@app.post("/api/learn/summarize")
+async def api_learn_summarize(payload: dict):
+    """Generates a summary: 'quick' (3-5 points), 'key_points', or 'detailed'."""
+    from fastapi.responses import JSONResponse
+    doc_id = payload.get("document_id", "")
+    section_id = payload.get("section_id")
+    mode = payload.get("mode", "quick")
+
+    try:
+        result = await learn_service.summarize(doc_id, section_id, mode)
+        return JSONResponse(content=result)
+    except Exception as e:
+        log.error("Learn summarize failed: %s", e)
+        return JSONResponse(status_code=500, content={"error": str(e), "summary": "Could not generate summary."})
+
+
+@app.post("/api/learn/ask")
+async def api_learn_ask(payload: dict):
+    """Document-grounded Q&A with strict anti-hallucination and source citations."""
+    from fastapi.responses import JSONResponse
+    doc_id = payload.get("document_id", "")
+    question = payload.get("question", "").strip()
+    if not question:
+        return JSONResponse(status_code=400, content={"error": "Question is empty."})
+
+    try:
+        result = await learn_service.ask_grounded(doc_id, question)
+        return JSONResponse(content=result)
+    except Exception as e:
+        log.error("Learn ask failed: %s", e)
+        return JSONResponse(status_code=500, content={
+            "answer": "The learning assistant is temporarily unavailable. You can still read the extracted material.",
+            "found": False,
+            "source": None,
+        })
+
+
+@app.post("/api/learn/quiz")
+async def api_learn_quiz(payload: dict):
+    """Generates structured educational MCQs (5 or 10 questions) strictly from the document."""
+    from fastapi.responses import JSONResponse
+    doc_id = payload.get("document_id", "")
+    num_questions = int(payload.get("num_questions", 5))
+
+    try:
+        result = await learn_service.generate_quiz(doc_id, num_questions)
+        return JSONResponse(content=result)
+    except Exception as e:
+        log.error("Learn quiz generation failed: %s", e)
+        return JSONResponse(status_code=500, content={"error": "I couldn't create the quiz. Please try again."})
+
+
+@app.delete("/api/learn/document/{document_id}")
+async def api_learn_delete_document(document_id: str):
+    """Ends the study session and clears document cache."""
+    from fastapi.responses import JSONResponse
+    deleted = learn_service.delete_document(document_id)
+    return JSONResponse(content={"deleted": deleted})
+
+
 @app.get("/")
 async def index():
     return FileResponse(config.CLIENT_DIR / "index.html")

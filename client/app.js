@@ -51,6 +51,9 @@ const COMMAND_ALIASES = {
   help: [
     "help", "voice help", "tutorial", "how to use", "instructions", "guide", "what can i say", "commands"
   ],
+  learn: [
+    "learn", "study", "study material", "notes", "open learn", "setu learn", "education"
+  ],
 };
 
 const SNOOZE_PHRASES = ["stop", "ok stop", "okay stop", "quiet", "mute", "shut up"];
@@ -593,6 +596,7 @@ class SetuApp {
         case "read":      await this._runReadMode(epoch); break;
         case "question":  await this._runQuestionMode(epoch); break;
         case "help":      await this._runHelpMode(epoch); break;
+        case "learn":     await this._sayAndWait("Opening SETU Learn."); location.href = "/learn"; break;
       }
     } catch (err) {
       console.error(`❌ [Mode #${epoch} error]`, cmd, err);
