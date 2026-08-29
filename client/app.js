@@ -1023,8 +1023,11 @@ class SetuApp {
       audio.onended = cleanup;
       audio.onerror = cleanup;
       audio.play().catch((err) => {
-        console.warn("Audio play failed, falling back:", err);
-        cleanup();
+        console.warn("Audio play failed, falling back to browser TTS:", err);
+        ended = true;
+        URL.revokeObjectURL(url);
+        if (this.currentAudio === audio) this.currentAudio = null;
+        this._speakWithBrowserFallback(text);
       });
 
       const safetyMs = Math.max(8000, Math.round((text.length / 10) * 1000) + 5000);
@@ -1064,7 +1067,14 @@ class SetuApp {
         };
         audio.onended = cleanup;
         audio.onerror = cleanup;
-        audio.play().catch(cleanup);
+        audio.play().catch(async (err) => {
+          console.warn("Audio play failed, falling back to browser TTS:", err);
+          done = true;
+          URL.revokeObjectURL(url);
+          if (this.currentAudio === audio) this.currentAudio = null;
+          await this._sayAndWaitBrowserFallback(text);
+          resolve();
+        });
         const safetyMs = Math.max(12000, Math.round((text.length / 10) * 1000) + 8000);
         setTimeout(cleanup, safetyMs);
       });
