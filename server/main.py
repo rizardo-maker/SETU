@@ -22,6 +22,7 @@ import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from server import config
 from server.ws_protocol import parse_client_message, ClientFrame, ClientAudio, ClientControl
@@ -68,6 +69,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="SETU", lifespan=lifespan)
+
+# Enable CORS for network mode (mobile browsers, companion apps, external devices)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.exception_handler(Exception)
@@ -798,6 +808,42 @@ async def favicon():
 app.mount("/static", StaticFiles(directory=str(config.CLIENT_DIR)), name="static")
 
 
+def get_network_ips() -> list[str]:
+    """Discover all active non-loopback IPv4 addresses for LAN / Network mode access."""
+    ips: set[str] = set()
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.5)
+        try:
+            s.connect(("8.8.8.8", 80))
+            primary = s.getsockname()[0]
+            if primary and primary != "127.0.0.1":
+                ips.add(primary)
+        except Exception:
+            pass
+        finally:
+            s.close()
+    except Exception:
+        pass
+
+    try:
+        import subprocess
+        out = subprocess.check_output(["ifconfig"], text=True, stderr=subprocess.DEVNULL)
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("inet "):
+                parts = line.split()
+                if len(parts) >= 2:
+                    ip = parts[1]
+                    if ip != "127.0.0.1" and not ip.startswith("169.254."):
+                        ips.add(ip)
+    except Exception:
+        pass
+
+    return sorted(list(ips))
+
+
 def _ssl_context() -> ssl.SSLContext | None:
     if not config.USE_TLS:
         return None
@@ -821,4 +867,20 @@ if __name__ == "__main__":
     if ssl_ctx is not None:
         kwargs["ssl_certfile"] = str(config.CERT_FILE)
         kwargs["ssl_keyfile"] = str(config.KEY_FILE)
+        proto = "https"
+    else:
+        proto = "http"
+
+    net_ips = get_network_ips()
+    print("\n" + "=" * 62)
+    print("  🚀 SETU ASSISTIVE VISION — NETWORK MODE READY")
+    print("=" * 62)
+    print(f"  • Local Device:    {proto}://localhost:{config.PORT}")
+    for ip in net_ips:
+        print(f"  • Network / Phone: {proto}://{ip}:{config.PORT}")
+    print("=" * 62)
+    print("  📱 Connect any phone or device to the SAME Wi-Fi network")
+    print("     and visit the Network URL above in Safari/Chrome.")
+    print("=" * 62 + "\n")
+
     uvicorn.run("server.main:app", host=config.HOST, port=config.PORT, reload=False, **kwargs)

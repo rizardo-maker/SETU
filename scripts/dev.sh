@@ -34,12 +34,10 @@ fi
 
 mkdir -p models certs
 
-if [ ! -f certs/cert.pem ]; then
+if [ ! -f certs/cert.pem ] || [ ! -f certs/key.pem ]; then
   echo ""
-  echo "No HTTPS certificate found yet. The server will fall back to plain"
-  echo "HTTP, which is fine for localhost testing but will NOT let a phone's"
-  echo "camera work. Run ./scripts/gen_certs.sh before demoing on a phone."
-  echo ""
+  echo "Generating network HTTPS certificates (required for mobile phone cameras)..."
+  ./scripts/gen_certs.sh
 fi
 
 if ! curl -sS -m 1 -o /dev/null http://127.0.0.1:11434/api/tags 2>/dev/null; then

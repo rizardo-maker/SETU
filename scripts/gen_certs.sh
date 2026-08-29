@@ -19,23 +19,25 @@ fi
 mkcert -install
 
 mkdir -p certs
-LAN_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo "")
+LAN_IPS=($(ifconfig 2>/dev/null | grep "inet " | grep -v "127.0.0.1" | grep -v "169.254" | awk '{print $2}'))
 
-echo "Generating certificate for localhost, 127.0.0.1${LAN_IP:+, and $LAN_IP}"
-if [ -n "$LAN_IP" ]; then
-  mkcert -cert-file certs/cert.pem -key-file certs/key.pem localhost 127.0.0.1 "$LAN_IP"
+if [ ${#LAN_IPS[@]} -gt 0 ]; then
+  echo "Generating certificate for localhost, 127.0.0.1, and network IPs: ${LAN_IPS[*]}"
+  mkcert -cert-file certs/cert.pem -key-file certs/key.pem localhost 127.0.0.1 "${LAN_IPS[@]}"
 else
+  echo "Generating certificate for localhost and 127.0.0.1"
   mkcert -cert-file certs/cert.pem -key-file certs/key.pem localhost 127.0.0.1
-  echo "Could not detect a LAN IP automatically. If phones can't connect,"
-  echo "find your Mac's IP (System Settings > Wi-Fi > Details) and re-run:"
-  echo "  mkcert -cert-file certs/cert.pem -key-file certs/key.pem localhost 127.0.0.1 <your-ip>"
 fi
 
 echo ""
-echo "Done. On your phone, open Wi-Fi settings and confirm it's on the SAME"
-echo "network as this Mac, then visit: https://${LAN_IP:-<this-macs-ip>}:8443"
+echo "============================================================"
+echo "  SETU SSL Certificates Generated Successfully"
+echo "============================================================"
+for ip in "${LAN_IPS[@]}"; do
+  echo "  • Phone / Network URL: https://${ip}:8443"
+done
+echo "  • Local Device URL:   https://localhost:8443"
+echo "============================================================"
 echo ""
-echo "IMPORTANT: mkcert's root CA is trusted by THIS Mac only. A phone will"
-echo "still show a certificate warning unless you also install mkcert's"
-echo "root CA on the phone (mkcert -CAROOT shows where it lives) — for a"
-echo "quick demo it's usually faster to just tap through the warning."
+echo "Note: On your phone, connect to the SAME Wi-Fi network and open"
+echo "the Network URL above. (Tap through the self-signed cert warning on phone)."

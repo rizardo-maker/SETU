@@ -18,24 +18,14 @@ read, not just imported.
 ## Quickstart
 
 ```bash
-./scripts/dev.sh              # first run: creates a venv, installs core deps, starts the server
+./scripts/network.sh          # starts server in Network Mode with auto HTTPS & LAN IPs
+# or
+./scripts/dev.sh              # standard startup (creates venv, starts server)
 ```
 
-Open **https://localhost:8443** (or **http://localhost:8000** if you
-haven't generated certs yet — see below). Grant camera permission.
+Open **https://localhost:8443** on this computer, or open the displayed **Network URL** (e.g. `https://10.10.85.71:8443`) on any smartphone or tablet connected to the same Wi-Fi.
 
-To test from a phone on the same Wi-Fi, you need HTTPS first:
-
-```bash
-./scripts/gen_certs.sh
-./scripts/dev.sh
-```
-
-Then visit `https://<this-Mac's-LAN-IP>:8443` on the phone. Do this on
-day one of the hackathon, not the night before you present —
-`getUserMedia` fails silently over plain HTTP on anything but
-localhost, and that failure mode has killed more accessibility demos
-than any model bug.
+`getUserMedia` (camera) requires HTTPS on mobile browsers — `./scripts/network.sh` automatically generates trusted certificates for all your LAN IPs.
 
 ## What works out of the box vs. what you need to add
 
